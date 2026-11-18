@@ -19,7 +19,7 @@ Type `/pet` to bring the panel back if you close it.
 Mochi also lives on your Windows desktop, outside the Claude window, in a see-through window that stays on top. It starts by itself when a Claude Code session starts; each session reports how it is doing, and the desktop Mochi shows the busiest of them:
 
 - **One line above Mochi's head per chat that needs you**: "website: has a question!", "api-server: done ✓". Click a line to open that chat in the Claude app.
-- **Click Mochi** to open the chat that needs you most (or the one you used last) and hush the sound. Opening that chat in the Claude app yourself hushes it too: the waving and the sound stop once the chat is on your screen, while its line stays until you answer.
+- **Click Mochi** to open the chat that needs you most (or the one you used last) and hush the sound. Going to the Claude window yourself hushes it too: the waving and the sound stop as soon as Claude is in front, while the line stays until you answer or open that chat. And if you are already in Claude and active (mouse or keyboard in the last 2 minutes) when a question or reply comes in, Mochi doesn't ring at all, just shows the line.
 - **Tray icon**: Mochi has no taskbar button and stays out of Alt+Tab; its face in the system tray hides or shows it (left-click) and has Open Claude and Quit (right-click).
 - **Drag Mochi** anywhere (it hangs on to the cursor with both paws while you carry it); **resize** it with the corner grip or the mouse wheel.
 - **Show chats in progress** (on by default): a fainter line for every chat Claude is working on. When nothing runs, or with it off, Mochi shows just itself.

@@ -30,7 +30,17 @@ public static class MochiNative {
   [DllImport("user32.dll", EntryPoint = "SetWindowLongPtr")] static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int index, IntPtr value);
   [DllImport("user32.dll", EntryPoint = "GetWindowLong")] static extern int GetWindowLong32(IntPtr hWnd, int index);
   [DllImport("user32.dll", EntryPoint = "SetWindowLong")] static extern int SetWindowLong32(IntPtr hWnd, int index, int value);
+  [StructLayout(LayoutKind.Sequential)] struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
+  [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LASTINPUTINFO info);
   const int GWL_EXSTYLE = -20;
+
+  // How long since the last mouse or keyboard input, in milliseconds.
+  public static double IdleMilliseconds() {
+    LASTINPUTINFO info = new LASTINPUTINFO();
+    info.cbSize = (uint)Marshal.SizeOf(info);
+    if (!GetLastInputInfo(ref info)) return 0;
+    return unchecked((uint)Environment.TickCount - info.dwTime);
+  }
   const long WS_EX_TOOLWINDOW = 0x80, WS_EX_APPWINDOW = 0x40000;
 
   // The process name of the window in front ("Claude" for the Claude app), or "".
@@ -310,11 +320,22 @@ $script:Cache = @{}        # file -> last good report, so a half-written file ne
 $script:AckDone = @{}      # session -> finishedAt you have seen
 $script:AckAlert = @{}     # session -> alertSince you have seen
 $script:LastSeen = @{}     # session -> the last seenAt it reported
+$script:HushAlert = @{}    # session -> alertSince hushed because you were in Claude (line kept)
+$script:HushDone = @{}     # session -> finishedAt hushed the same way
+$script:WasInFront = $false
 
-# Whether the Claude app's window is the one in front (MOCHI_TEST_FOREGROUND=1 pretends so, for tests).
+# Whether the Claude app's window is the one in front. For tests: MOCHI_TEST_FOREGROUND=1
+# pretends so; =file pretends so while a file named test-foreground sits in Mochi's folder.
 function Test-ClaudeInFront {
+  if ($env:MOCHI_TEST_FOREGROUND -eq 'file') { return (Test-Path (Join-Path $Dir 'test-foreground')) }
   if ($env:MOCHI_TEST_FOREGROUND) { return $true }
   try { return [MochiNative]::ForegroundProcess() -eq 'Claude' } catch { return $false }
+}
+
+# Milliseconds since the last mouse or keyboard input anywhere (0 for tests that pretend).
+function Get-IdleMs {
+  if ($env:MOCHI_TEST_FOREGROUND) { return 0 }
+  try { return [MochiNative]::IdleMilliseconds() } catch { return [double]::MaxValue }
 }
 $script:FirstPoll = $true
 $script:ProjectNo = @{}    # session -> its "Project N" number, for chats with no real folder
@@ -430,9 +451,16 @@ function Update-State {
     $script:FirstPoll = $false
   }
 
-  # You opened the chat yourself: once it reports being on screen after its alert or
-  # reply, with the Claude window in front, that counts as seen. No need to click Mochi.
+  # Are you in Claude right now? Coming to its window hushes whatever was ringing; being in
+  # it and active (input in the last 2 minutes) means a new question or reply is in front of
+  # you, so it never rings. The lines stay either way, until you answer or open them.
   $inFront = Test-ClaudeInFront
+  $cameToFront = $inFront -and -not $script:WasInFront
+  $script:WasInFront = $inFront
+  $watching = $inFront -and (Get-IdleMs) -lt 120000
+  $script:FrontState = "in front $inFront, watching $watching"
+
+  # You typed in a chat (its prompt box reports it): with Claude in front, that chat is seen.
   foreach ($s in $sessions) {
     $key = Get-Key $s
     $seen = [double]$s.seenAt
@@ -473,22 +501,30 @@ function Update-State {
 
   $attention = New-Object System.Collections.ArrayList
   $ring = $false
-  $unseenAlert = $false
-  $donePending = 0
+  $ringAlert = $false
+  $ringDone = $false
   foreach ($n in ($named | Sort-Object { [double]$_.s.alertSince })) {
     $s = $n.s
     if ($s.alert) {
-      # The line stays until the question is answered; the waving and the sound stop once seen.
+      # The line stays until the question is answered; the waving and the sound stop once
+      # seen or hushed.
       $what = if ($s.alert -eq 'question') { 'has a question!' } else { 'needs your approval!' }
       [void]$attention.Add([pscustomobject]@{ text = "$($n.name): $what"; session = $s; style = 'alert' })
-      if ([double]$s.alertSince -gt (Get-Ack $script:AckAlert (Get-Key $s))) { $ring = $true; $unseenAlert = $true }
+      $key = Get-Key $s
+      $since = [double]$s.alertSince
+      if ($since -gt (Get-Ack $script:AckAlert $key) -and $since -gt (Get-Ack $script:HushAlert $key)) {
+        if ($watching -or $cameToFront) { $script:HushAlert[$key] = $since } else { $ring = $true; $ringAlert = $true }
+      }
     }
   }
   foreach ($n in ($named | Sort-Object { - [double]$_.s.finishedAt })) {
     if (Test-DonePending $n.s) {
       [void]$attention.Add([pscustomobject]@{ text = "$($n.name): done " + [char]0x2713; session = $n.s; style = 'done' })
-      $ring = $true
-      $donePending++
+      $key = Get-Key $n.s
+      $at = [double]$n.s.finishedAt
+      if ($at -gt (Get-Ack $script:HushDone $key)) {
+        if ($watching -or $cameToFront) { $script:HushDone[$key] = $at } else { $ring = $true; $ringDone = $true }
+      }
     }
   }
   $needsYou = $attention.Count
@@ -504,8 +540,8 @@ function Update-State {
 
   $mood = 'idle'
   if ($sessions.Count -eq 0) { $mood = 'sleeping' }
-  elseif ($unseenAlert) { $mood = 'alert' }
-  elseif ($donePending -gt 0) { $mood = 'happy' }
+  elseif ($ringAlert) { $mood = 'alert' }
+  elseif ($ringDone) { $mood = 'happy' }
   elseif (@($sessions | Where-Object { $_.mood -eq 'working' }).Count -gt 0) { $mood = 'working' }
   elseif (@($sessions | Where-Object { $_.mood -ne 'sleeping' }).Count -eq 0) { $mood = 'sleeping' }
   $script:Mood = $mood
@@ -544,7 +580,7 @@ $script:Dragging = $false
 $script:Act = ''
 $script:ActUntil = 0
 $script:AfterGetup = 'groom'
-$script:Dir = 1                       # the way Mochi faces: 1 right, -1 left
+$script:Heading = 1                       # the way Mochi faces: 1 right, -1 left
 $script:NextWalk = 6000 + $script:Rng.Next(0, 10000)
 $script:Bouncing = $false
 $script:Held = $false
@@ -667,7 +703,7 @@ function Step-Motion {
       'fallen' { $script:AfterGetup = 'groom'; Start-Act 'getup' 540 }
       'getup' { if ($script:AfterGetup -eq 'groom') { Start-Act 'groom' 2720 } else { Stop-Acts } }
       'groom' {
-        if ($script:S.wander -and $script:Rng.Next(2) -eq 0) { $script:Dir = - $script:Dir; $script:Act = 'walk' } else { Stop-Acts }
+        if ($script:S.wander -and $script:Rng.Next(2) -eq 0) { $script:Heading = - $script:Heading; $script:Act = 'walk' } else { Stop-Acts }
       }
     }
     return
@@ -679,7 +715,7 @@ function Step-Motion {
   $right = $area.Right - $half
   if ($script:Act -eq 'walk') {
     if ($mood -ne 'idle' -or -not $script:S.wander) { Stop-Acts; return }
-    $x = $script:Anchor.X + $script:Dir * 34.0 * ($script:S.scale / 4) * $dt
+    $x = $script:Anchor.X + $script:Heading * 34.0 * ($script:S.scale / 4) * $dt
     $isAtWall = $x -le $left -or $x -ge $right
     $x = [Math]::Max($left, [Math]::Min($right, $x))
     $script:Anchor = @{ X = $x; Y = $script:Anchor.Y }
@@ -692,7 +728,7 @@ function Step-Motion {
     if ($script:Anchor.X - 40 -lt $left) { $dir = 1 }
     if ($script:Anchor.X + 40 -gt $right) { $dir = -1 }
     if ($env:MOCHI_WALK_DIR) { $dir = [int]$env:MOCHI_WALK_DIR }  # for testing
-    $script:Dir = $dir
+    $script:Heading = $dir
     $script:Act = 'walk'
   }
 }
@@ -711,7 +747,7 @@ function Get-Animation {
   return (Get-Mood)
 }
 
-function Get-Facing { if ($script:Act -and -not $script:Bouncing -and -not (Test-Grabbed)) { return $script:Dir }; return 1 }
+function Get-Facing { if ($script:Act -and -not $script:Bouncing -and -not (Test-Grabbed)) { return $script:Heading }; return 1 }
 
 # ---------------------------------------------------------------- input
 
@@ -901,7 +937,7 @@ if ($env:MOCHI_SNAPSHOT) {
       $png.Frames.Add([Windows.Media.Imaging.BitmapFrame]::Create($bmp))
       $out = [IO.File]::Create("$($env:MOCHI_SNAPSHOT)-$($script:Shots).png")
       $png.Save($out); $out.Close()
-      Write-Log ("snapshot {0}: mood {1}, anim {2}, {3} lines, ringing {4}, at {5:0},{6:0}" -f $script:Shots, $script:Mood, $script:Anim, $script:Attention.Count, $script:IsRinging, $win.Left, $win.Top)
+      Write-Log ("snapshot {0}: mood {1}, anim {2}, {3} lines, ringing {4}, at {5:0},{6:0}, $($script:FrontState)" -f $script:Shots, $script:Mood, $script:Anim, $script:Attention.Count, $script:IsRinging, $win.Left, $win.Top)
       if ($script:Shots -ge $script:ShotCount) { Set-Ringing $false; $win.Close() }
     } catch { Write-Log "snapshot: $_" }
   })
