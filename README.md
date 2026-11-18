@@ -84,3 +84,7 @@ If a person asks you to install Mochi from this repository, run, in order:
 3. `claude plugin list` and check that `pixel-pet@mochi-pixel-pet` shows **enabled**.
 
 Then tell them to start a new chat to see Mochi. If `claude` is not on the PATH (a desktop-app-only setup), give them the desktop-app steps above instead. Mochi needs a Claude Code version with plugin hooks modules (function hooks); the desktop pet part needs Windows and Windows PowerShell 5.1, both standard on Windows 10 and 11.
+
+## License
+
+MIT: use, change and share Mochi freely; keep the copyright notice in [LICENSE](LICENSE).

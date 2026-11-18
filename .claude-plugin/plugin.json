@@ -2,5 +2,6 @@
   "name": "pixel-pet",
   "version": "0.2.0",
   "description": "Mochi, an animated pixel-art pet beside the chat and on your Windows desktop: idles, works, sleeps, cheers, and waves when Claude has a question.",
+  "license": "MIT",
   "types": "./types/index.d.ts"
 }
