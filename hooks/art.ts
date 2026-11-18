@@ -21,6 +21,7 @@ const PAL: Record<string, string> = {
   y: '#b9b2c9', // dim thought dot
   Z: '#7aa2f7', // sleepy z
   H: '#2d1e3a33', // floor shadow
+  K: '#ffe4c4', // paw, lighter than the body so it reads in front of the face
   // Fur colors the desktop pet cycles through in DVD bounce mode: body, then shade.
   '1': '#9be3c0', '2': '#5fbf94', // mint
   '3': '#c9b6ff', '4': '#9c84e0', // lilac
@@ -55,9 +56,9 @@ const BODY = [
 const FOOT = ['OBBO', 'OOOO']
 
 type Dot = readonly [number, number, string]
-type Eyes = 'open' | 'closed' | 'happy' | 'wide' | 'down' | 'sleep' | 'look'
-type Mouth = 'smile' | 'open' | 'flat' | 'snore'
-type Arm = 'waveA' | 'waveB' | 'leftUp' | 'flyL' | 'flyR' | 'flyL2' | 'flyR2'
+type Eyes = 'open' | 'closed' | 'happy' | 'wide' | 'down' | 'sleep' | 'look' | 'squint' | 'dizzy'
+type Mouth = 'smile' | 'open' | 'flat' | 'snore' | 'wavy' | 'lick'
+type Arm = 'waveA' | 'waveB' | 'leftUp' | 'flyL' | 'flyR' | 'flyL2' | 'flyR2' | 'lick1' | 'lick2'
 
 const EYES: Record<Eyes, Dot[]> = {
   open: [[3, 3, 'E'], [4, 3, 'E'], [5, 3, 'E'], [3, 4, 'E'], [4, 4, 'W'], [5, 4, 'E'], [3, 5, 'E'], [4, 5, 'E'], [5, 5, 'E'], [3, 6, 'E'], [4, 6, 'E'], [5, 6, 'E'], [10, 3, 'E'], [11, 3, 'E'], [12, 3, 'E'], [10, 4, 'E'], [11, 4, 'W'], [12, 4, 'E'], [10, 5, 'E'], [11, 5, 'E'], [12, 5, 'E'], [10, 6, 'E'], [11, 6, 'E'], [12, 6, 'E']],
@@ -70,6 +71,10 @@ const EYES: Record<Eyes, Dot[]> = {
   down: [[4, 6, 'E'], [5, 6, 'E'], [4, 7, 'E'], [5, 7, 'E'], [10, 6, 'E'], [11, 6, 'E'], [10, 7, 'E'], [11, 7, 'E']],
   sleep: [[3, 5, 'E'], [4, 6, 'E'], [5, 6, 'E'], [6, 5, 'E'], [9, 5, 'E'], [10, 6, 'E'], [11, 6, 'E'], [12, 5, 'E']],
   look: [],
+  // > < : squeezed shut, as it slams into a wall.
+  squint: [[3, 4, 'E'], [4, 5, 'E'], [5, 5, 'E'], [3, 6, 'E'], [12, 4, 'E'], [11, 5, 'E'], [10, 5, 'E'], [12, 6, 'E']],
+  // x x : seeing stars, lying where it fell.
+  dizzy: [[3, 4, 'E'], [5, 4, 'E'], [4, 5, 'E'], [3, 6, 'E'], [5, 6, 'E'], [10, 4, 'E'], [12, 4, 'E'], [11, 5, 'E'], [10, 6, 'E'], [12, 6, 'E']],
 }
 // Looking the way it walks (right; the desktop pet mirrors it for left): open eyes, a pixel over.
 EYES.look = EYES.open.map(([x, y, c]) => [x + 1, y, c] as const)
@@ -78,6 +83,9 @@ const MOUTH: Record<Mouth, Dot[]> = {
   open: [[6, 7, 'E'], [7, 7, 'E'], [8, 7, 'E'], [9, 7, 'E'], [6, 8, 'E'], [7, 8, 'M'], [8, 8, 'M'], [9, 8, 'E'], [7, 9, 'E'], [8, 9, 'E']],
   flat: [[7, 8, 'E'], [8, 8, 'E']],
   snore: [[7, 8, 'M']],
+  wavy: [[6, 8, 'E'], [7, 7, 'E'], [8, 8, 'E'], [9, 7, 'E']],
+  // Tongue out toward the paw it is licking.
+  lick: [[7, 8, 'E'], [8, 8, 'E'], [9, 8, 'I'], [10, 8, 'I']],
 }
 const CHEEKS: Dot[] = [[2, 7, 'P'], [3, 7, 'P'], [12, 7, 'P'], [13, 7, 'P']]
 
@@ -90,6 +98,9 @@ const ARMS: Record<Arm, { x: number; y: number; rows: string[] }> = {
   flyR: { x: 15, y: 6, rows: ['OOO.', 'BBBO', 'OOO.'] },
   flyL2: { x: -3, y: 4, rows: ['O...', 'OOOO', 'OBBB', '.OOO'] },
   flyR2: { x: 15, y: 4, rows: ['...O', 'OOOO', 'BBBO', 'OOO.'] },
+  // A paw held up to the mouth for licking, then rubbed up over the face, cat style.
+  lick1: { x: 11, y: 6, rows: ['.OOO.', 'OKKKO', 'OKKKO', '.OKO.', '.OKO.', '.OKO.'] },
+  lick2: { x: 11, y: 4, rows: ['.OOO.', 'OKKKO', 'OKKKO', '.OKO.', '.OKO.', '.OKO.', '.OKO.', '.OKO.'] },
 }
 const LID = ['OOOOOOOOOO', 'OGGGxxGGGO', 'OGGGGGGGGO', 'OOOOOOOOOO']
 const BASE = ['ODDDDDDDDDDDDO', 'OOOOOOOOOOOOOO']
@@ -105,7 +116,7 @@ type Pose = {
   dy?: number
   /** Body and face down this much over still feet: breathing, crouching. */
   breath?: number
-  arms?: Arm[]
+  arms?: readonly Arm[]
   laptop?: { leftPawUp: boolean; light: boolean; dot: number }
   sparkles?: boolean
   /** Floating Z's at this step (0-7), for pictures that animate frame by frame. */
@@ -114,6 +125,12 @@ type Pose = {
   step?: 'left' | 'right'
   /** Fur color, an index into TINTS. */
   tint?: number
+  /** No floor shadow: flying, or lying down (which draws its own). */
+  noShadow?: boolean
+  /** Stars flying off the side it hit a wall with. */
+  impact?: boolean
+  /** Tipped over onto its back; the number steps the dizzy stars round its head. */
+  lying?: number
 }
 
 type Grid = Map<string, string>
@@ -136,7 +153,7 @@ function compose(p: Pose): Grid {
   const lift = Math.max(0, -dy)
   // Floor shadow, smaller while the pet is in the air; none while it flies about.
   const k = lift >= 4 ? 3 : lift >= 2 ? 2 : lift > 0 ? 1 : 0
-  if (p.tint === undefined) for (let x = OX + 2 + k; x <= OX + 13 - k; x++) g.set(`${x},${OY + 15}`, 'H')
+  if (!p.noShadow) for (let x = OX + 2 + k; x <= OX + 13 - k; x++) g.set(`${x},${OY + 15}`, 'H')
 
   const fx = OX
   const fy = OY + dy
@@ -156,6 +173,7 @@ function compose(p: Pose): Grid {
     ;[4, 7, 10].forEach((x, i) => stamp(g, ['cc', 'cc'], fx + x, fy - 4, { c: i === p.laptop!.dot ? 'Y' : 'y' }))
   }
   if (p.sparkles) for (const [x, y] of SPARKLE_AT) stamp(g, SPARKLE, fx + x, fy + y)
+  if (p.impact) for (const [x, y] of [[16, 1], [18, 7], [15, 11]] as const) stamp(g, SPARKLE, fx + x, by + y)
   if (p.zs !== undefined) {
     // Two Z's drifting up and to the right, half a cycle apart; each vanishes at its top.
     for (const [shape, x, y, offset] of [[Z_SMALL, 15, -1, 0], [Z_BIG, 16, -3, 4]] as const) {
@@ -335,11 +353,63 @@ export const SVG: Record<Mood, string> = {
   alert: svgFor('alert'),
 }
 
-/** The poses the desktop pet steps through: as in the chat, with the Z's drawn into the frames. */
-/** The desktop pet's animations: the five moods, a walk, and a DVD-bounce flight per fur tint. */
-const DESKTOP_ANIMATIONS = ['idle', 'working', 'sleeping', 'happy', 'alert', 'walk', 'bounce0', 'bounce1', 'bounce2', 'bounce3', 'bounce4'] as const
+/**
+ * The desktop pet's animations: the five moods (sleeping with its Z's drawn
+ * into the frames), a walk, the wall routine (bonk, fallen, getup, groom), and
+ * per fur tint a DVD-bounce flight and a pose holding on to the cursor.
+ * Everything faces right; the desktop pet mirrors it to face left.
+ */
+const DESKTOP_ANIMATIONS = [
+  'idle', 'working', 'sleeping', 'happy', 'alert', 'walk', 'bonk', 'fallen', 'getup', 'groom',
+  'bounce0', 'bounce1', 'bounce2', 'bounce3', 'bounce4', 'hold0', 'hold1', 'hold2', 'hold3', 'hold4',
+] as const
 
 function desktopPoses(name: (typeof DESKTOP_ANIMATIONS)[number]): Pose[] {
+  if (name === 'bonk') {
+    // Squashed against the wall, eyes shut, stars flying.
+    return [
+      { eyes: 'squint', mouth: 'open', breath: 2, impact: true, ms: 200 },
+      { eyes: 'squint', mouth: 'wavy', breath: 1, impact: true, ms: 250 },
+    ]
+  }
+  if (name === 'fallen') {
+    // Flipped over, feet kicking in the air.
+    return [0, 1, 2, 3].map(i => ({
+      eyes: 'dizzy',
+      mouth: 'wavy',
+      noShadow: true,
+      lying: i,
+      step: i % 2 === 0 ? 'left' : 'right',
+      ms: 260,
+    }))
+  }
+  if (name === 'getup') {
+    return [
+      { eyes: 'closed', mouth: 'flat', breath: 2, ms: 200 },
+      { eyes: 'open', mouth: 'smile', dy: -2, ms: 180 },
+      { eyes: 'open', mouth: 'smile', ms: 160 },
+    ]
+  }
+  if (name === 'groom') {
+    // Lick the paw, rub the face with it, lick again.
+    const groom = { eyes: 'closed' } as const
+    return [
+      { ...groom, mouth: 'lick', arms: ['lick1'], ms: 320 },
+      { ...groom, mouth: 'flat', arms: ['lick1'], ms: 160 },
+      { ...groom, mouth: 'lick', arms: ['lick1'], ms: 320 },
+      { ...groom, mouth: 'flat', arms: ['lick2'], ms: 280 },
+      { ...groom, mouth: 'flat', arms: ['lick2'], breath: 1, ms: 280 },
+    ]
+  }
+  if (name.startsWith('hold')) {
+    // Caught under the cursor in mid-flight: both paws up, holding on to it.
+    const tint = Number(name.slice('hold'.length))
+    const hold = { eyes: 'happy', mouth: 'smile', arms: ['leftUp', 'waveA'], tint, noShadow: true } as const
+    return [
+      { ...hold, ms: 300 },
+      { ...hold, breath: 1, ms: 300 },
+    ]
+  }
   if (name === 'sleeping') {
     const base = POSES.sleeping[0]!
     return [0, 1, 2, 3, 4, 5, 6, 7].map(i => ({ ...base, ms: 375, breath: i < 4 ? 1 : 2, zs: i }))
@@ -357,7 +427,7 @@ function desktopPoses(name: (typeof DESKTOP_ANIMATIONS)[number]): Pose[] {
   if (name.startsWith('bounce')) {
     // Flying with arms spread, flapping, mouth open in a "wheee".
     const tint = Number(name.slice('bounce'.length))
-    const fly = { eyes: 'wide', mouth: 'open', tint } as const
+    const fly = { eyes: 'wide', mouth: 'open', tint, noShadow: true } as const
     return [
       { ...fly, arms: ['flyL', 'flyR'], dy: -1, ms: 140 },
       { ...fly, arms: ['flyL2', 'flyR2'], dy: -2, ms: 140 },
@@ -366,6 +436,43 @@ function desktopPoses(name: (typeof DESKTOP_ANIMATIONS)[number]): Pose[] {
     ]
   }
   return POSES[name as Mood]
+}
+
+/** A desktop frame: the pose as composed, flipped over when it is lying down. */
+function composeDesktop(p: Pose): Grid {
+  const g = compose(p)
+  if (p.lying === undefined) return g
+  // Turn it upside down, feet in the air.
+  const turned: [number, number, string][] = []
+  let minX = Infinity
+  let maxX = -Infinity
+  let minY = Infinity
+  let maxY = -Infinity
+  for (const [key, c] of g) {
+    const [x, y] = key.split(',').map(Number) as [number, number]
+    const nx = -(x - OX)
+    const ny = -(y - (OY + 14))
+    turned.push([nx, ny, c])
+    minX = Math.min(minX, nx)
+    maxX = Math.max(maxX, nx)
+    minY = Math.min(minY, ny)
+    maxY = Math.max(maxY, ny)
+  }
+  // Centered where it stood, resting on the floor.
+  const sx = OX + 8 - Math.round((minX + maxX) / 2)
+  const sy = OY + 14 - maxY
+  const out: Grid = new Map()
+  for (let x = minX + sx + 1; x <= maxX + sx - 1; x++) out.set(`${x},${OY + 15}`, 'H')
+  for (const [x, y, c] of turned) out.set(`${x + sx},${y + sy}`, c)
+  // Two stars circling over its head.
+  const head = minX + sx
+  const top = minY + sy
+  const spots: [number, number][] = [[head - 1, top - 4], [head + 4, top - 6], [head + 9, top - 4], [head + 4, top - 2]]
+  for (const k of [0, 2]) {
+    const [x, y] = spots[(p.lying + k) % spots.length]!
+    stamp(out, SPARKLE, x, y)
+  }
+  return out
 }
 
 /**
@@ -385,7 +492,7 @@ export function desktopFramesJson(): string {
   const moods: Record<string, { ms: number; rows: string[] }[]> = {}
   for (const mood of DESKTOP_ANIMATIONS) {
     moods[mood] = desktopPoses(mood).map(p => {
-      const g = compose(p)
+      const g = composeDesktop(p)
       const rows: string[] = []
       for (let y = 0; y < CH; y++) {
         let row = ''

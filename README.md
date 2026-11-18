@@ -20,8 +20,11 @@ Mochi also lives on your Windows desktop, outside the Claude window, in a see-th
 - **Click Mochi** to open the chat that needs you most (or the one you used last) and hush the sound.
 - **Drag Mochi** anywhere; **resize** it with the corner grip or the mouse wheel.
 - **Show chats in progress** (on by default): a fainter line for every chat Claude is working on. When nothing runs, or with it off, Mochi shows just itself.
-- **Wander around** (on by default): now and then, while idle, Mochi strolls left or right along its spot.
-- **DVD bounce mode**: Mochi flies about the screen, bouncing off every edge and changing fur color at each bounce. It parks while a chat needs you, and takes off again after.
+- **Names**: a line names the chat's project folder. Chats with no real folder are "Project 1", "Project 2"...; chats sharing a folder are told apart as "#1", "#2".
+- **Wander around** (on by default): now and then, while idle, Mochi walks off left or right until it slams into the edge of the screen, falls over seeing stars, gets up, licks its paw, then either walks back the other way or stands about for a while.
+- **DVD bounce mode**: Mochi flies about the screen, bouncing off every edge and changing fur color at each bounce. Put the cursor on it and it stops and holds on to the cursor; move away and it flies on. It parks while a chat needs you, and takes off again after.
+- **Zoomies**: after napping for 3 minutes (`napMinutes` in the settings), Mochi takes off DVD style until you catch it with the cursor; then it lands and stays up a minute.
+- **Always on top** (on by default): turn it off to let other windows cover Mochi.
 - **A sound loops** while a question waits or a finished chat is unseen. Right-click → **Sound** to turn it off or pick it: a ringtone of your own saved as `%USERPROFILE%\.claude\mochi\phone.mp3` (the default when it is there), the built-in chime, or any sound file (WAV, MP3, WMA, M4A).
 - Right-click also has size presets, **Start with Windows**, **Start when Claude starts**, and **Quit Mochi**.
 

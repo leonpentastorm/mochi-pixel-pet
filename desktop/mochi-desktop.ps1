@@ -44,6 +44,7 @@ $script:S = @{
   x = $null; y = $null; scale = 4.0
   soundOn = $true; soundChoice = 'phone'; soundFile = $null
   autoStart = $true; showProgress = $true; wander = $true; dvdMode = $false
+  onTop = $true; napMinutes = 3
 }
 if (Test-Path $SettingsFile) {
   try {
@@ -133,7 +134,7 @@ function Import-Frames {
       $bmp = New-Object Windows.Media.Imaging.WriteableBitmap($w, $h, 96, 96, [Windows.Media.PixelFormats]::Bgra32, $null)
       $bmp.WritePixels((New-Object Windows.Int32Rect(0, 0, $w, $h)), $px, $w * 4, 0)
       $bmp.Freeze()
-      [void]$list.Add([pscustomobject]@{ ms = [int]$f.ms; bmp = $bmp })
+      [void]$list.Add([pscustomobject]@{ ms = [int]$f.ms; bmp = $bmp; px = $px })
     }
     $moods[$m.Name] = $list
   }
@@ -261,6 +262,10 @@ $script:Cache = @{}        # file -> last good report, so a half-written file ne
 $script:AckDone = @{}      # session -> finishedAt you have seen
 $script:AckAlert = @{}     # session -> alertSince you have seen
 $script:FirstPoll = $true
+$script:ProjectNo = @{}    # session -> its "Project N" number, for chats with no real folder
+$script:ProjectCount = 0
+$script:ChatNo = @{}       # session -> its number among chats in the same folder
+$script:FolderCount = @{}
 $script:Sessions = @()
 $script:Attention = @()
 $script:Mood = 'sleeping'
@@ -371,12 +376,31 @@ function Update-State {
   }
   $script:Sessions = $sessions
 
-  # Names, with a number where two chats share a project.
-  $seen = @{}
-  $named = foreach ($s in ($sessions | Sort-Object { [double]$_.startedAt })) {
-    $name = [string]$s.project
-    if ($seen.ContainsKey($name)) { $seen[$name]++; $name = "$name ($($seen[$name]))" } else { $seen[$name] = 1 }
-    [pscustomobject]@{ s = $s; name = $name }
+  # Names: a chat with no real project folder (the app's scratch folders) is
+  # "Project 1", "Project 2"...; chats sharing a folder are told apart as
+  # "<folder> #1", "#2"... Numbers are handed out as Mochi first sees each chat
+  # and kept while it runs.
+  $byProject = @{}
+  foreach ($s in ($sessions | Sort-Object { [double]$_.startedAt })) {
+    $key = Get-Key $s
+    $base = [string]$s.project
+    if ($base -match '^scratch-\d{4}-\d{2}-\d{2}' -or [string]$s.cwd -match '[\\/]scratch-workspaces[\\/]' -or -not $base) {
+      if (-not $script:ProjectNo.ContainsKey($key)) { $script:ProjectNo[$key] = ++$script:ProjectCount }
+      $base = "Project $($script:ProjectNo[$key])"
+    } elseif (-not $script:ChatNo.ContainsKey($key)) {
+      if (-not $script:FolderCount.ContainsKey($base)) { $script:FolderCount[$base] = 0 }
+      $script:ChatNo[$key] = ++$script:FolderCount[$base]
+    }
+    if (-not $byProject.ContainsKey($base)) { $byProject[$base] = New-Object System.Collections.ArrayList }
+    [void]$byProject[$base].Add($s)
+  }
+  $named = foreach ($base in $byProject.Keys) {
+    $group = $byProject[$base]
+    foreach ($s in $group) {
+      $name = $base
+      if ($group.Count -gt 1 -and $script:ChatNo.ContainsKey((Get-Key $s))) { $name = "$base #$($script:ChatNo[(Get-Key $s)])" }
+      [pscustomobject]@{ s = $s; name = $name }
+    }
   }
 
   $attention = New-Object System.Collections.ArrayList
@@ -434,24 +458,69 @@ function Invoke-PetClick {
 }
 
 # ---------------------------------------------------------------- moving about
+#
+# One act at a time: standing (''), a walk, or the wall routine that ends every
+# walk (bonk -> fallen -> getup -> groom, then off the other way or a rest).
+# Above that, flying: DVD mode (the toggle) or the zoomies (after a long nap,
+# until you catch Mochi with the cursor). In DVD mode the cursor on Mochi holds it.
 
+Add-Type -AssemblyName System.Windows.Forms
 $script:Rng = New-Object Random
 $script:Clock = [Diagnostics.Stopwatch]::StartNew()
 $script:LastMotion = 0
 $script:Dragging = $false
-$script:Walking = $false
-$script:WalkDir = 1
-$script:WalkTarget = 0.0
+$script:Act = ''
+$script:ActUntil = 0
+$script:AfterGetup = 'groom'
+$script:Dir = 1                       # the way Mochi faces: 1 right, -1 left
 $script:NextWalk = 6000 + $script:Rng.Next(0, 10000)
 $script:Bouncing = $false
+$script:Held = $false
+$script:Zoomies = $false
+$script:SleepSince = 0
+$script:AwakeUntil = 0
 $script:Vel = @{ X = 150.0; Y = -150.0 }
 $script:Tint = 0
+$script:CurrentFrame = $null
 
-function Stop-Walking {
-  if (-not $script:Walking) { return }
-  $script:Walking = $false
+# Caught after the zoomies, Mochi stays up a minute even if every chat sleeps.
+function Get-Mood {
+  if ($script:Mood -eq 'sleeping' -and $script:Clock.ElapsedMilliseconds -lt $script:AwakeUntil) { return 'idle' }
+  return $script:Mood
+}
+
+function Start-Act([string]$act, [int]$ms) {
+  $script:Act = $act
+  $script:ActUntil = $script:Clock.ElapsedMilliseconds + $ms
+}
+
+function Stop-Acts {
+  if ($script:Act -eq '') { return }
+  $script:Act = ''
   $script:NextWalk = $script:Clock.ElapsedMilliseconds + $script:Rng.Next(8000, 25000)
   Save-Position
+}
+
+# Whether the cursor is on one of Mochi's drawn pixels, not the clear space around it.
+function Test-CursorOnPet {
+  $f = $script:CurrentFrame
+  if ($null -eq $f -or $pet.ActualWidth -le 0) { return $false }
+  $cursor = [System.Windows.Forms.Cursor]::Position
+  $a = $pet.PointToScreen((New-Object Windows.Point(0, 0)))
+  $b = $pet.PointToScreen((New-Object Windows.Point($pet.ActualWidth, $pet.ActualHeight)))
+  $x0 = [Math]::Min($a.X, $b.X); $x1 = [Math]::Max($a.X, $b.X)
+  $y0 = [Math]::Min($a.Y, $b.Y); $y1 = [Math]::Max($a.Y, $b.Y)
+  if ($cursor.X -lt $x0 -or $cursor.X -ge $x1 -or $cursor.Y -lt $y0 -or $cursor.Y -ge $y1) { return $false }
+  $cx = [int][Math]::Floor(($cursor.X - $x0) / ($x1 - $x0) * $script:W)
+  $cy = [int][Math]::Floor(($cursor.Y - $y0) / ($y1 - $y0) * $script:H)
+  # A pixel of slack all round, so a flying Mochi is not too hard to catch.
+  for ($dy = -1; $dy -le 1; $dy++) {
+    for ($dx = -1; $dx -le 1; $dx++) {
+      $x = $cx + $dx; $y = $cy + $dy
+      if ($x -ge 0 -and $x -lt $script:W -and $y -ge 0 -and $y -lt $script:H -and $f.px[($y * $script:W + $x) * 4 + 3] -gt 0) { return $true }
+    }
+  }
+  return $false
 }
 
 function Step-Motion {
@@ -462,15 +531,42 @@ function Step-Motion {
   $area = [Windows.SystemParameters]::WorkArea
   $w = $win.ActualWidth
   $h = $win.ActualHeight
+  $mood = Get-Mood
 
-  # DVD mode: fly about, off every wall, a new color each time; parked while a chat needs you.
-  if ($script:S.dvdMode -and -not $script:NeedsYou) {
+  # Napping too long brings on the zoomies; a chat waking up ends them.
+  if ($mood -eq 'sleeping' -and -not $script:S.dvdMode) {
+    if ($script:SleepSince -eq 0) { $script:SleepSince = $t }
+    elseif (-not $script:Zoomies -and $t - $script:SleepSince -ge [double]$script:S.napMinutes * 60000) { $script:Zoomies = $true }
+  } else {
+    $script:SleepSince = 0
+    if ($script:Zoomies -and $script:Mood -ne 'sleeping') { $script:Zoomies = $false }
+  }
+
+  # Flying: DVD mode (parked while a chat needs you) or the zoomies.
+  if (($script:S.dvdMode -and -not $script:NeedsYou) -or $script:Zoomies) {
     if (-not $script:Bouncing) {
       $script:Bouncing = $true
-      $script:Walking = $false
+      $script:Act = ''
       $speed = 150.0
       $script:Vel = @{ X = $speed * $(if ($script:Rng.Next(2) -eq 0) { -1 } else { 1 }); Y = - $speed }
     }
+    if (Test-CursorOnPet) {
+      if ($script:Zoomies) {
+        # Caught! Back on its feet where it was caught, and awake for a while.
+        $script:Zoomies = $false
+        $script:Bouncing = $false
+        $script:Held = $false
+        $script:SleepSince = 0
+        $script:AwakeUntil = $t + 60000
+        $script:AfterGetup = ''
+        Start-Act 'getup' 540
+        Save-Position
+        return
+      }
+      $script:Held = $true
+      return
+    }
+    $script:Held = $false
     $x = $script:Anchor.X + $script:Vel.X * $dt
     $y = $script:Anchor.Y + $script:Vel.Y * $dt
     $hit = $false
@@ -485,36 +581,57 @@ function Step-Motion {
   }
   if ($script:Bouncing) {
     $script:Bouncing = $false
+    $script:Held = $false
     $script:NextWalk = $t + $script:Rng.Next(8000, 25000)
     Save-Position
   }
 
-  # Wandering: now and then, while idle, a stroll left or right.
-  if ($script:Walking) {
-    if ($script:Mood -ne 'idle' -or -not $script:S.wander) { Stop-Walking; return }
-    $x = $script:Anchor.X + $script:WalkDir * 34.0 * ($script:S.scale / 4) * $dt
-    $left = $area.Left + $w / 2; $right = $area.Right - $w / 2
-    $done = ($script:WalkDir -gt 0 -and $x -ge $script:WalkTarget) -or ($script:WalkDir -lt 0 -and $x -le $script:WalkTarget)
+  # The wall routine plays out, unless a chat needs Mochi for something else.
+  if ($script:Act -in @('bonk', 'fallen', 'getup', 'groom')) {
+    if ($mood -ne 'idle') { Stop-Acts; return }
+    if ($t -lt $script:ActUntil) { return }
+    switch ($script:Act) {
+      'bonk' { Start-Act 'fallen' 1800 }
+      'fallen' { $script:AfterGetup = 'groom'; Start-Act 'getup' 540 }
+      'getup' { if ($script:AfterGetup -eq 'groom') { Start-Act 'groom' 2720 } else { Stop-Acts } }
+      'groom' {
+        if ($script:S.wander -and $script:Rng.Next(2) -eq 0) { $script:Dir = - $script:Dir; $script:Act = 'walk' } else { Stop-Acts }
+      }
+    }
+    return
+  }
+
+  # Walking: all the way to the edge of the screen, and into it.
+  $half = 8 * $script:S.scale          # half of Mochi's body: the clear margin round it may hang off screen
+  $left = $area.Left + $half
+  $right = $area.Right - $half
+  if ($script:Act -eq 'walk') {
+    if ($mood -ne 'idle' -or -not $script:S.wander) { Stop-Acts; return }
+    $x = $script:Anchor.X + $script:Dir * 34.0 * ($script:S.scale / 4) * $dt
+    $isAtWall = $x -le $left -or $x -ge $right
     $x = [Math]::Max($left, [Math]::Min($right, $x))
     $script:Anchor = @{ X = $x; Y = $script:Anchor.Y }
     Apply-Anchor
-    if ($done -or $x -le $left -or $x -ge $right) { Stop-Walking }
-  } elseif ($script:S.wander -and $script:Mood -eq 'idle' -and $t -ge $script:NextWalk) {
-    $left = $area.Left + $w / 2; $right = $area.Right - $w / 2
+    if ($isAtWall) { Start-Act 'bonk' 450 }
+    return
+  }
+  if ($script:S.wander -and $mood -eq 'idle' -and $t -ge $script:NextWalk) {
     $dir = if ($script:Rng.Next(2) -eq 0) { -1 } else { 1 }
-    if ($script:Anchor.X - 60 -lt $left) { $dir = 1 }
-    if ($script:Anchor.X + 60 -gt $right) { $dir = -1 }
-    $script:WalkDir = $dir
-    $script:WalkTarget = [Math]::Max($left, [Math]::Min($right, $script:Anchor.X + $dir * $script:Rng.Next(80, 320)))
-    $script:Walking = $true
+    if ($script:Anchor.X - 40 -lt $left) { $dir = 1 }
+    if ($script:Anchor.X + 40 -gt $right) { $dir = -1 }
+    if ($env:MOCHI_WALK_DIR) { $dir = [int]$env:MOCHI_WALK_DIR }  # for testing
+    $script:Dir = $dir
+    $script:Act = 'walk'
   }
 }
 
 function Get-Animation {
-  if ($script:Bouncing) { return "bounce$($script:Tint)" }
-  if ($script:Walking) { return 'walk' }
-  return $script:Mood
+  if ($script:Bouncing) { if ($script:Held) { return "hold$($script:Tint)" }; return "bounce$($script:Tint)" }
+  if ($script:Act) { return $script:Act }
+  return (Get-Mood)
 }
+
+function Get-Facing { if ($script:Act -and -not $script:Bouncing) { return $script:Dir }; return 1 }
 
 # ---------------------------------------------------------------- input
 
@@ -591,6 +708,7 @@ foreach ($size in @(@('Small', 3), @('Medium', 4), @('Large', 6), @('Huge', 9)))
 [void](Add-MenuItem $menu 'Show chats in progress' { param($item) $script:S.showProgress = $item.IsChecked; Save-Settings; Update-State } $script:S.showProgress)
 [void](Add-MenuItem $menu 'Wander around' { param($item) $script:S.wander = $item.IsChecked; Save-Settings } $script:S.wander)
 [void](Add-MenuItem $menu 'DVD bounce mode' { param($item) $script:S.dvdMode = $item.IsChecked; Save-Settings } $script:S.dvdMode)
+[void](Add-MenuItem $menu 'Always on top' { param($item) $script:S.onTop = $item.IsChecked; $win.Topmost = $item.IsChecked; Save-Settings } ($script:S.onTop -ne $false))
 [void]$menu.Items.Add((New-Object Windows.Controls.Separator))
 
 $soundMenu = Add-MenuItem $menu 'Sound' $null
@@ -624,6 +742,7 @@ $petBox.ContextMenu = $menu
 # ---------------------------------------------------------------- run
 
 Set-Scale ([double]$script:S.scale)
+$win.Topmost = ($script:S.onTop -ne $false)
 $pet.Source = $script:Moods['sleeping'][0].bmp
 $script:Anim = ''
 $script:AnimSince = [Diagnostics.Stopwatch]::StartNew()
@@ -635,14 +754,18 @@ $animation.Add_Tick({
     Step-Motion
     $name = Get-Animation
     if ($name -ne $script:Anim) { $script:Anim = $name; $script:AnimSince.Restart() }
-    $flip = if ($script:Walking) { $script:WalkDir } else { 1 }
+    $flip = Get-Facing
     if ($facing.ScaleX -ne $flip) { $facing.ScaleX = $flip }
     $frames = $script:Moods[$name]
     if ($null -eq $frames) { $frames = $script:Moods['idle'] }
     $total = 0; foreach ($f in $frames) { $total += $f.ms }
     $t = $script:AnimSince.ElapsedMilliseconds % [Math]::Max(1, $total)
     foreach ($f in $frames) {
-      if ($t -lt $f.ms) { if (-not [object]::ReferenceEquals($pet.Source, $f.bmp)) { $pet.Source = $f.bmp }; break }
+      if ($t -lt $f.ms) {
+        $script:CurrentFrame = $f
+        if (-not [object]::ReferenceEquals($pet.Source, $f.bmp)) { $pet.Source = $f.bmp }
+        break
+      }
       $t -= $f.ms
     }
   } catch { Write-Log "animate: $_" }
@@ -656,13 +779,15 @@ $animation.Start()
 $poll.Start()
 $win.Add_Closed({ Save-Position; Write-Log 'quit' })
 
-# For testing: with MOCHI_SNAPSHOT set to a file prefix, save four pictures of the
-# window 1.5 s apart (<prefix>-1.png ...) and quit.
+# For testing: with MOCHI_SNAPSHOT set to a file prefix, save MOCHI_SNAPSHOT_COUNT
+# pictures of the window (4 by default) MOCHI_SNAPSHOT_MS apart (1500 by default),
+# as <prefix>-1.png ..., then quit. The first stroll starts after a second.
 if ($env:MOCHI_SNAPSHOT) {
   $script:Shots = 0
+  $script:ShotCount = if ($env:MOCHI_SNAPSHOT_COUNT) { [int]$env:MOCHI_SNAPSHOT_COUNT } else { 4 }
   $script:NextWalk = 1000
   $snap = New-Object Windows.Threading.DispatcherTimer
-  $snap.Interval = [TimeSpan]::FromMilliseconds(1500)
+  $snap.Interval = [TimeSpan]::FromMilliseconds($(if ($env:MOCHI_SNAPSHOT_MS) { [int]$env:MOCHI_SNAPSHOT_MS } else { 1500 }))
   $snap.Add_Tick({
     try {
       $script:Shots++
@@ -674,7 +799,7 @@ if ($env:MOCHI_SNAPSHOT) {
       $out = [IO.File]::Create("$($env:MOCHI_SNAPSHOT)-$($script:Shots).png")
       $png.Save($out); $out.Close()
       Write-Log ("snapshot {0}: mood {1}, anim {2}, {3} lines, ringing {4}, at {5:0},{6:0}" -f $script:Shots, $script:Mood, $script:Anim, $script:Attention.Count, $script:IsRinging, $win.Left, $win.Top)
-      if ($script:Shots -ge 4) { Set-Ringing $false; $win.Close() }
+      if ($script:Shots -ge $script:ShotCount) { Set-Ringing $false; $win.Close() }
     } catch { Write-Log "snapshot: $_" }
   })
   $snap.Start()
