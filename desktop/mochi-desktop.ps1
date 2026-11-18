@@ -4,9 +4,12 @@
 # %USERPROFILE%\.claude\mochi\sessions\<session>.json. This window reads them
 # once a second and:
 #   - animates Mochi for the busiest state (question > done > working > idle > asleep),
-#   - shows one speech line per chat that needs you; clicking a line opens that chat,
+#   - shows one speech line per chat that needs you, and (a toggle) one per chat
+#     in progress; clicking a line opens that chat,
 #   - opens the chat that needs you most when you click Mochi itself,
-#   - loops a sound while a question waits or a finished chat is unseen.
+#   - loops a sound while a question waits or a finished chat is unseen,
+#   - wanders left and right now and then while idle, or, in DVD mode, bounces
+#     around the screen changing color at every wall.
 # Drag Mochi to move it, drag the corner grip or turn the mouse wheel to resize,
 # right-click for the menu. Settings live in %USERPROFILE%\.claude\mochi\desktop.json.
 #
@@ -20,7 +23,9 @@ $SessionsDir = Join-Path $Dir 'sessions'
 $FramesFile = Join-Path $Dir 'frames.json'
 $SettingsFile = Join-Path $Dir 'desktop.json'
 $LogFile = Join-Path $Dir 'desktop.log'
-$DefaultSound = Join-Path $Dir 'chime.wav'
+$ChimeSound = Join-Path $Dir 'chime.wav'
+# A ringtone of your own can sit beside the chime as phone.mp3; it is the default when there.
+$PhoneSound = Join-Path $Dir 'phone.mp3'
 New-Item -ItemType Directory -Force -Path $SessionsDir | Out-Null
 
 function Write-Log([string]$message) {
@@ -35,7 +40,11 @@ Write-Log 'started'
 
 # ---------------------------------------------------------------- settings
 
-$script:S = @{ x = $null; y = $null; scale = 4.0; soundOn = $true; soundFile = $DefaultSound; autoStart = $true }
+$script:S = @{
+  x = $null; y = $null; scale = 4.0
+  soundOn = $true; soundChoice = 'phone'; soundFile = $null
+  autoStart = $true; showProgress = $true; wander = $true; dvdMode = $false
+}
 if (Test-Path $SettingsFile) {
   try {
     $saved = [IO.File]::ReadAllText($SettingsFile) | ConvertFrom-Json
@@ -46,7 +55,7 @@ function Save-Settings {
   try { [IO.File]::WriteAllText($SettingsFile, ($script:S | ConvertTo-Json)) } catch { Write-Log "settings not saved: $_" }
 }
 
-# ---------------------------------------------------------------- the default chime
+# ---------------------------------------------------------------- the built-in chime
 
 function New-Chime([string]$path) {
   # Two soft bell notes and a pause, so a loop of it rings rather than drones.
@@ -74,57 +83,69 @@ function New-Chime([string]$path) {
   $w.Flush()
   [IO.File]::WriteAllBytes($path, $ms.ToArray())
 }
-if (-not (Test-Path $DefaultSound)) { try { New-Chime $DefaultSound } catch { Write-Log "chime not made: $_" } }
+if (-not (Test-Path $ChimeSound)) { try { New-Chime $ChimeSound } catch { Write-Log "chime not made: $_" } }
 
 # ---------------------------------------------------------------- frames
 
-for ($i = 0; $i -lt 40 -and -not (Test-Path $FramesFile); $i++) { Start-Sleep -Milliseconds 250 }
-if (-not (Test-Path $FramesFile)) { Write-Log 'no frames.json: start a Claude session with the pixel-pet mod first'; return }
-$art = [IO.File]::ReadAllText($FramesFile) | ConvertFrom-Json
-
-# Crop every frame to the pixels any frame uses, so Mochi has no wide empty margins.
-$minX = $art.width; $minY = $art.height; $maxX = 0; $maxY = 0
-foreach ($m in $art.moods.PSObject.Properties) {
-  foreach ($f in $m.Value) {
-    for ($y = 0; $y -lt $art.height; $y++) {
-      $row = $f.rows[$y]
-      $first = $row.IndexOfAny([char[]]'0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ')
-      if ($first -lt 0) { continue }
-      $last = $row.LastIndexOfAny([char[]]'0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ')
-      if ($first -lt $minX) { $minX = $first }; if ($last -gt $maxX) { $maxX = $last }
-      if ($y -lt $minY) { $minY = $y }; if ($y -gt $maxY) { $maxY = $y }
-    }
-  }
-}
-$script:W = $maxX - $minX + 1
-$script:H = $maxY - $minY + 1
-
-$palette = New-Object 'System.Collections.Generic.Dictionary[char,byte[]]'
-foreach ($p in $art.palette.PSObject.Properties) {
-  $c = [Windows.Media.ColorConverter]::ConvertFromString($p.Value)
-  $palette[[char]$p.Name] = [byte[]]@($c.B, $c.G, $c.R, $c.A)
-}
+$script:FramesStamp = $null
 $script:Moods = @{}
-foreach ($m in $art.moods.PSObject.Properties) {
-  $list = New-Object System.Collections.ArrayList
-  foreach ($f in $m.Value) {
-    $px = New-Object byte[] ($script:W * $script:H * 4)
-    for ($y = 0; $y -lt $script:H; $y++) {
-      $row = $f.rows[$y + $minY]
-      for ($x = 0; $x -lt $script:W; $x++) {
-        $ch = $row[$x + $minX]
-        if ($ch -eq '.') { continue }
-        $bgra = $palette[$ch]
-        [Array]::Copy($bgra, 0, $px, ($y * $script:W + $x) * 4, 4)
+$script:W = 1; $script:H = 1
+
+# Reads frames.json (the mod rewrites it when Mochi's art changes) into bitmaps,
+# every frame cropped to the pixels any frame uses.
+function Import-Frames {
+  $stamp = (Get-Item -LiteralPath $FramesFile).LastWriteTimeUtc
+  $art = [IO.File]::ReadAllText($FramesFile) | ConvertFrom-Json
+  $inked = [char[]]'0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+  $minX = $art.width; $minY = $art.height; $maxX = 0; $maxY = 0
+  foreach ($m in $art.moods.PSObject.Properties) {
+    foreach ($f in $m.Value) {
+      for ($y = 0; $y -lt $art.height; $y++) {
+        $row = $f.rows[$y]
+        $first = $row.IndexOfAny($inked)
+        if ($first -lt 0) { continue }
+        $last = $row.LastIndexOfAny($inked)
+        if ($first -lt $minX) { $minX = $first }; if ($last -gt $maxX) { $maxX = $last }
+        if ($y -lt $minY) { $minY = $y }; if ($y -gt $maxY) { $maxY = $y }
       }
     }
-    $bmp = New-Object Windows.Media.Imaging.WriteableBitmap($script:W, $script:H, 96, 96, [Windows.Media.PixelFormats]::Bgra32, $null)
-    $bmp.WritePixels((New-Object Windows.Int32Rect(0, 0, $script:W, $script:H)), $px, $script:W * 4, 0)
-    $bmp.Freeze()
-    [void]$list.Add([pscustomobject]@{ ms = [int]$f.ms; bmp = $bmp })
   }
-  $script:Moods[$m.Name] = $list
+  $w = $maxX - $minX + 1
+  $h = $maxY - $minY + 1
+  $palette = New-Object 'System.Collections.Generic.Dictionary[char,byte[]]'
+  foreach ($p in $art.palette.PSObject.Properties) {
+    $c = [Windows.Media.ColorConverter]::ConvertFromString($p.Value)
+    $palette[[char]$p.Name] = [byte[]]@($c.B, $c.G, $c.R, $c.A)
+  }
+  $moods = @{}
+  foreach ($m in $art.moods.PSObject.Properties) {
+    $list = New-Object System.Collections.ArrayList
+    foreach ($f in $m.Value) {
+      $px = New-Object byte[] ($w * $h * 4)
+      for ($y = 0; $y -lt $h; $y++) {
+        $row = $f.rows[$y + $minY]
+        for ($x = 0; $x -lt $w; $x++) {
+          $ch = $row[$x + $minX]
+          if ($ch -eq '.') { continue }
+          [Array]::Copy($palette[$ch], 0, $px, ($y * $w + $x) * 4, 4)
+        }
+      }
+      $bmp = New-Object Windows.Media.Imaging.WriteableBitmap($w, $h, 96, 96, [Windows.Media.PixelFormats]::Bgra32, $null)
+      $bmp.WritePixels((New-Object Windows.Int32Rect(0, 0, $w, $h)), $px, $w * 4, 0)
+      $bmp.Freeze()
+      [void]$list.Add([pscustomobject]@{ ms = [int]$f.ms; bmp = $bmp })
+    }
+    $moods[$m.Name] = $list
+  }
+  $script:Moods = $moods
+  $script:W = $w
+  $script:H = $h
+  $script:FramesStamp = $stamp
 }
+
+for ($i = 0; $i -lt 40 -and -not (Test-Path $FramesFile); $i++) { Start-Sleep -Milliseconds 250 }
+if (-not (Test-Path $FramesFile)) { Write-Log 'no frames.json: start a Claude session with the pixel-pet mod first'; return }
+Import-Frames
 
 # ---------------------------------------------------------------- window
 
@@ -137,7 +158,10 @@ foreach ($m in $art.moods.PSObject.Properties) {
   <StackPanel>
     <StackPanel x:Name="Lines" HorizontalAlignment="Center"/>
     <Grid x:Name="PetBox" HorizontalAlignment="Center">
-      <Image x:Name="Pet" Stretch="Fill" RenderOptions.BitmapScalingMode="NearestNeighbor" Cursor="Hand"/>
+      <Image x:Name="Pet" Stretch="Fill" RenderOptions.BitmapScalingMode="NearestNeighbor" Cursor="Hand"
+             RenderTransformOrigin="0.5,0.5">
+        <Image.RenderTransform><ScaleTransform x:Name="Facing" ScaleX="1"/></Image.RenderTransform>
+      </Image>
       <Thumb x:Name="Grip" Width="12" Height="12" HorizontalAlignment="Right" VerticalAlignment="Bottom"
              Cursor="SizeNWSE" Opacity="0.35" ToolTip="Drag to resize Mochi">
         <Thumb.Template>
@@ -154,11 +178,13 @@ $win = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $x
 $lines = $win.FindName('Lines')
 $petBox = $win.FindName('PetBox')
 $pet = $win.FindName('Pet')
+$facing = $win.FindName('Facing')
 $grip = $win.FindName('Grip')
 
-$Ink = New-Object Windows.Media.SolidColorBrush([Windows.Media.ColorConverter]::ConvertFromString('#2D1E3A'))
-$Paper = New-Object Windows.Media.SolidColorBrush([Windows.Media.ColorConverter]::ConvertFromString('#FFFFFF'))
-$AlertPaper = New-Object Windows.Media.SolidColorBrush([Windows.Media.ColorConverter]::ConvertFromString('#FFF3C4'))
+function New-Brush([string]$color) { New-Object Windows.Media.SolidColorBrush([Windows.Media.ColorConverter]::ConvertFromString($color)) }
+$Ink = New-Brush '#2D1E3A'
+$Faded = New-Brush '#6B5F78'
+$LinePaper = @{ alert = (New-Brush '#FFF3C4'); done = (New-Brush '#FFFFFF'); progress = (New-Brush '#EEE8F8') }
 
 function Set-Scale([double]$scale) {
   $script:S.scale = [Math]::Round([Math]::Max(1.5, [Math]::Min(14.0, $scale)) * 2) / 2
@@ -171,7 +197,12 @@ function Set-Scale([double]$scale) {
 $script:Anchor = $null
 function Set-Anchor {
   $script:Anchor = @{ X = $win.Left + $win.ActualWidth / 2; Y = $win.Top + $win.ActualHeight }
+  Save-Position
+}
+function Save-Position {
+  if ($null -eq $script:Anchor) { return }
   $script:S.x = $script:Anchor.X; $script:S.y = $script:Anchor.Y
+  Save-Settings
 }
 function Apply-Anchor {
   if ($null -eq $script:Anchor) { return }
@@ -183,7 +214,10 @@ $win.Add_Loaded({
   try {
     $area = [Windows.SystemParameters]::WorkArea
     if ($null -ne $script:S.x -and $null -ne $script:S.y) {
-      $script:Anchor = @{ X = [double]$script:S.x; Y = [double]$script:S.y }
+      # Back where it was, kept on screen in case the screens changed.
+      $x = [Math]::Max($area.Left + 20, [Math]::Min($area.Right - 20, [double]$script:S.x))
+      $y = [Math]::Max($area.Top + 60, [Math]::Min($area.Bottom, [double]$script:S.y))
+      $script:Anchor = @{ X = $x; Y = $y }
     } else {
       $script:Anchor = @{ X = $area.Right - 120; Y = $area.Bottom - 8 }
     }
@@ -201,8 +235,12 @@ $script:Player.Add_MediaEnded({
 })
 $script:Player.Add_MediaFailed({ Write-Log "sound failed: $($_.ErrorException.Message)"; $script:IsRinging = $false })
 function Get-SoundFile {
-  if ($script:S.soundFile -and (Test-Path $script:S.soundFile)) { return [string]$script:S.soundFile }
-  return $DefaultSound
+  switch ([string]$script:S.soundChoice) {
+    'chime' { return $ChimeSound }
+    'custom' { if ($script:S.soundFile -and (Test-Path $script:S.soundFile)) { return [string]$script:S.soundFile } }
+    default { if (Test-Path $PhoneSound) { return $PhoneSound } }
+  }
+  return $ChimeSound
 }
 function Set-Ringing([bool]$on) {
   if ($on -and -not $script:IsRinging) {
@@ -214,6 +252,7 @@ function Set-Ringing([bool]$on) {
     $script:Player.Stop()
   }
 }
+function Restart-Ringing { if ($script:IsRinging) { Set-Ringing $false; Update-State } }
 $script:Tester = New-Object Windows.Media.MediaPlayer
 
 # ---------------------------------------------------------------- sessions
@@ -225,7 +264,6 @@ $script:FirstPoll = $true
 $script:Sessions = @()
 $script:Attention = @()
 $script:Mood = 'sleeping'
-$script:MoodSince = [Diagnostics.Stopwatch]::StartNew()
 
 function Get-Now { [DateTimeOffset]::Now.ToUnixTimeMilliseconds() }
 function Get-Key($s) { if ($s.session) { [string]$s.session } else { [string]$s.cli } }
@@ -270,12 +308,12 @@ function Set-Seen($s) {
   $script:AckAlert[$key] = [double]$s.alertSince
 }
 
-function New-Line([string]$text, $session, [bool]$isAlert) {
+function New-Line([string]$text, $session, [string]$style) {
   $border = New-Object Windows.Controls.Border
   $border.CornerRadius = New-Object Windows.CornerRadius(7)
-  $border.BorderBrush = $Ink
+  $border.BorderBrush = $(if ($style -eq 'progress') { $Faded } else { $Ink })
   $border.BorderThickness = New-Object Windows.Thickness(2)
-  $border.Background = $(if ($isAlert) { $AlertPaper } else { $Paper })
+  $border.Background = $LinePaper[$style]
   $border.Padding = New-Object Windows.Thickness(8, 3, 8, 3)
   $border.Margin = New-Object Windows.Thickness(0, 0, 0, 3)
   $border.HorizontalAlignment = 'Center'
@@ -283,7 +321,7 @@ function New-Line([string]$text, $session, [bool]$isAlert) {
   $border.ToolTip = 'Open this chat'
   $label = New-Object Windows.Controls.TextBlock
   $label.Text = $text
-  $label.Foreground = $Ink
+  $label.Foreground = $(if ($style -eq 'progress') { $Faded } else { $Ink })
   $label.FontFamily = New-Object Windows.Media.FontFamily('Consolas')
   $label.FontWeight = 'Bold'
   $label.FontSize = [Math]::Max(11, 7 + $script:S.scale * 1.4)
@@ -303,11 +341,11 @@ function New-Line([string]$text, $session, [bool]$isAlert) {
 }
 
 function Update-Lines {
-  $key = (@($script:Attention | ForEach-Object { "$($_.text)|$($_.isAlert)" }) -join "`n") + "|$($script:S.scale)"
+  $key = (@($script:Attention | ForEach-Object { "$($_.text)|$($_.style)" }) -join "`n") + "|$($script:S.scale)"
   if ($key -eq $script:LinesKey) { return }
   $script:LinesKey = $key
   $lines.Children.Clear()
-  foreach ($a in $script:Attention) { [void]$lines.Children.Add((New-Line $a.text $a.session $a.isAlert)) }
+  foreach ($a in $script:Attention) { [void]$lines.Children.Add((New-Line $a.text $a.session $a.style)) }
   if ($script:Attention.Count -gt 0) {
     # A little tail from the speech lines down to Mochi's head.
     $tail = New-Object Windows.Shapes.Path
@@ -320,6 +358,11 @@ function Update-Lines {
 }
 
 function Update-State {
+  if ((Test-Path $FramesFile) -and (Get-Item -LiteralPath $FramesFile).LastWriteTimeUtc -ne $script:FramesStamp) {
+    # New art from the mod: draw with it from now on.
+    try { Import-Frames; Set-Scale $script:S.scale; Write-Log 'art reloaded' } catch { Write-Log "art reload: $_" }
+  }
+
   $sessions = Read-Sessions
   if ($script:FirstPoll) {
     # What was already done or waiting before Mochi started counts as seen: no sound for old news.
@@ -342,25 +385,34 @@ function Update-State {
     $s = $n.s
     if ($s.alert) {
       $what = if ($s.alert -eq 'question') { 'has a question!' } else { 'needs your approval!' }
-      [void]$attention.Add([pscustomobject]@{ text = "$($n.name): $what"; session = $s; isAlert = $true })
+      [void]$attention.Add([pscustomobject]@{ text = "$($n.name): $what"; session = $s; style = 'alert' })
       if ([double]$s.alertSince -gt (Get-Ack $script:AckAlert (Get-Key $s))) { $ring = $true }
     }
   }
   foreach ($n in ($named | Sort-Object { - [double]$_.s.finishedAt })) {
     if (Test-DonePending $n.s) {
-      [void]$attention.Add([pscustomobject]@{ text = "$($n.name): done " + [char]0x2713; session = $n.s; isAlert = $false })
+      [void]$attention.Add([pscustomobject]@{ text = "$($n.name): done " + [char]0x2713; session = $n.s; style = 'done' })
       $ring = $true
     }
   }
-  $script:Attention = @($attention | Select-Object -First 6)
+  $needsYou = $attention.Count
+  if ($script:S.showProgress) {
+    foreach ($n in ($named | Sort-Object { [double]$_.s.startedAt })) {
+      if ($n.s.mood -eq 'working' -and -not $n.s.alert) {
+        [void]$attention.Add([pscustomobject]@{ text = "$($n.name): working" + [char]0x2026; session = $n.s; style = 'progress' })
+      }
+    }
+  }
+  $script:Attention = @($attention | Select-Object -First 8)
+  $script:NeedsYou = $needsYou -gt 0
 
   $mood = 'idle'
   if ($sessions.Count -eq 0) { $mood = 'sleeping' }
   elseif (@($sessions | Where-Object { $_.alert }).Count -gt 0) { $mood = 'alert' }
-  elseif ($attention.Count -gt 0) { $mood = 'happy' }
+  elseif ($needsYou -gt 0) { $mood = 'happy' }
   elseif (@($sessions | Where-Object { $_.mood -eq 'working' }).Count -gt 0) { $mood = 'working' }
   elseif (@($sessions | Where-Object { $_.mood -ne 'sleeping' }).Count -eq 0) { $mood = 'sleeping' }
-  if ($mood -ne $script:Mood) { $script:Mood = $mood; $script:MoodSince.Restart() }
+  $script:Mood = $mood
 
   $tip = if ($sessions.Count -eq 0) { 'Mochi: no Claude chats running' } else {
     'Mochi' + "`n" + ((@($named | ForEach-Object { "$($_.name): $($_.s.mood)" })) -join "`n") + "`nClick to open, drag to move, right-click for options"
@@ -381,17 +433,101 @@ function Invoke-PetClick {
   Update-State
 }
 
+# ---------------------------------------------------------------- moving about
+
+$script:Rng = New-Object Random
+$script:Clock = [Diagnostics.Stopwatch]::StartNew()
+$script:LastMotion = 0
+$script:Dragging = $false
+$script:Walking = $false
+$script:WalkDir = 1
+$script:WalkTarget = 0.0
+$script:NextWalk = 6000 + $script:Rng.Next(0, 10000)
+$script:Bouncing = $false
+$script:Vel = @{ X = 150.0; Y = -150.0 }
+$script:Tint = 0
+
+function Stop-Walking {
+  if (-not $script:Walking) { return }
+  $script:Walking = $false
+  $script:NextWalk = $script:Clock.ElapsedMilliseconds + $script:Rng.Next(8000, 25000)
+  Save-Position
+}
+
+function Step-Motion {
+  $t = $script:Clock.ElapsedMilliseconds
+  $dt = [Math]::Min(100, $t - $script:LastMotion) / 1000.0
+  $script:LastMotion = $t
+  if ($script:Dragging -or $null -eq $script:Anchor) { return }
+  $area = [Windows.SystemParameters]::WorkArea
+  $w = $win.ActualWidth
+  $h = $win.ActualHeight
+
+  # DVD mode: fly about, off every wall, a new color each time; parked while a chat needs you.
+  if ($script:S.dvdMode -and -not $script:NeedsYou) {
+    if (-not $script:Bouncing) {
+      $script:Bouncing = $true
+      $script:Walking = $false
+      $speed = 150.0
+      $script:Vel = @{ X = $speed * $(if ($script:Rng.Next(2) -eq 0) { -1 } else { 1 }); Y = - $speed }
+    }
+    $x = $script:Anchor.X + $script:Vel.X * $dt
+    $y = $script:Anchor.Y + $script:Vel.Y * $dt
+    $hit = $false
+    if ($x - $w / 2 -lt $area.Left) { $x = $area.Left + $w / 2; $script:Vel.X = [Math]::Abs($script:Vel.X); $hit = $true }
+    if ($x + $w / 2 -gt $area.Right) { $x = $area.Right - $w / 2; $script:Vel.X = - [Math]::Abs($script:Vel.X); $hit = $true }
+    if ($y - $h -lt $area.Top) { $y = $area.Top + $h; $script:Vel.Y = [Math]::Abs($script:Vel.Y); $hit = $true }
+    if ($y -gt $area.Bottom) { $y = $area.Bottom; $script:Vel.Y = - [Math]::Abs($script:Vel.Y); $hit = $true }
+    if ($hit) { $script:Tint = ($script:Tint + 1) % 5 }
+    $script:Anchor = @{ X = $x; Y = $y }
+    Apply-Anchor
+    return
+  }
+  if ($script:Bouncing) {
+    $script:Bouncing = $false
+    $script:NextWalk = $t + $script:Rng.Next(8000, 25000)
+    Save-Position
+  }
+
+  # Wandering: now and then, while idle, a stroll left or right.
+  if ($script:Walking) {
+    if ($script:Mood -ne 'idle' -or -not $script:S.wander) { Stop-Walking; return }
+    $x = $script:Anchor.X + $script:WalkDir * 34.0 * ($script:S.scale / 4) * $dt
+    $left = $area.Left + $w / 2; $right = $area.Right - $w / 2
+    $done = ($script:WalkDir -gt 0 -and $x -ge $script:WalkTarget) -or ($script:WalkDir -lt 0 -and $x -le $script:WalkTarget)
+    $x = [Math]::Max($left, [Math]::Min($right, $x))
+    $script:Anchor = @{ X = $x; Y = $script:Anchor.Y }
+    Apply-Anchor
+    if ($done -or $x -le $left -or $x -ge $right) { Stop-Walking }
+  } elseif ($script:S.wander -and $script:Mood -eq 'idle' -and $t -ge $script:NextWalk) {
+    $left = $area.Left + $w / 2; $right = $area.Right - $w / 2
+    $dir = if ($script:Rng.Next(2) -eq 0) { -1 } else { 1 }
+    if ($script:Anchor.X - 60 -lt $left) { $dir = 1 }
+    if ($script:Anchor.X + 60 -gt $right) { $dir = -1 }
+    $script:WalkDir = $dir
+    $script:WalkTarget = [Math]::Max($left, [Math]::Min($right, $script:Anchor.X + $dir * $script:Rng.Next(80, 320)))
+    $script:Walking = $true
+  }
+}
+
+function Get-Animation {
+  if ($script:Bouncing) { return "bounce$($script:Tint)" }
+  if ($script:Walking) { return 'walk' }
+  return $script:Mood
+}
+
 # ---------------------------------------------------------------- input
 
 $pet.Add_MouseLeftButtonDown({
   param($sender, $e)
   try {
     $left = $win.Left; $top = $win.Top
-    $win.DragMove()
+    $script:Dragging = $true
+    try { $win.DragMove() } finally { $script:Dragging = $false }
     if ([Math]::Abs($win.Left - $left) -lt 3 -and [Math]::Abs($win.Top - $top) -lt 3) {
       Invoke-PetClick
     } else {
-      Set-Anchor; Save-Settings
+      Set-Anchor
     }
   } catch { Write-Log "pet click: $_" }
 })
@@ -399,7 +535,7 @@ $pet.Add_MouseWheel({
   param($sender, $e)
   try { Set-Scale ($script:S.scale + [Math]::Sign($e.Delta) * 0.5); Save-Settings } catch { Write-Log "wheel: $_" }
 })
-$grip.Add_DragStarted({ $script:GripStart = $script:S.scale; $script:GripMoved = 0.0 })
+$grip.Add_DragStarted({ $script:GripStart = $script:S.scale; $script:GripMoved = 0.0; $script:Dragging = $true })
 $grip.Add_DragDelta({
   param($sender, $e)
   try {
@@ -407,7 +543,7 @@ $grip.Add_DragDelta({
     Set-Scale ($script:GripStart + $script:GripMoved / [Math]::Max(8, $script:W))
   } catch { Write-Log "grip: $_" }
 })
-$grip.Add_DragCompleted({ Save-Settings })
+$grip.Add_DragCompleted({ $script:Dragging = $false; Save-Settings })
 $petBox.Add_MouseEnter({ $grip.Opacity = 0.9 })
 $petBox.Add_MouseLeave({ $grip.Opacity = 0.35 })
 
@@ -452,22 +588,32 @@ foreach ($size in @(@('Small', 3), @('Medium', 4), @('Large', 6), @('Huge', 9)))
   $sizeItem = Add-MenuItem $sizeMenu $size[0] { param($item) Set-Scale ([double]$item.CommandParameter); Save-Settings }
   $sizeItem.CommandParameter = $size[1]
 }
+[void](Add-MenuItem $menu 'Show chats in progress' { param($item) $script:S.showProgress = $item.IsChecked; Save-Settings; Update-State } $script:S.showProgress)
+[void](Add-MenuItem $menu 'Wander around' { param($item) $script:S.wander = $item.IsChecked; Save-Settings } $script:S.wander)
+[void](Add-MenuItem $menu 'DVD bounce mode' { param($item) $script:S.dvdMode = $item.IsChecked; Save-Settings } $script:S.dvdMode)
 [void]$menu.Items.Add((New-Object Windows.Controls.Separator))
-[void](Add-MenuItem $menu 'Sound' { param($item) $script:S.soundOn = $item.IsChecked; Save-Settings; Update-State } $script:S.soundOn)
-[void](Add-MenuItem $menu 'Choose sound file...' {
+
+$soundMenu = Add-MenuItem $menu 'Sound' $null
+[void](Add-MenuItem $soundMenu 'Sound on' { param($item) $script:S.soundOn = $item.IsChecked; Save-Settings; Update-State } $script:S.soundOn)
+[void]$soundMenu.Items.Add((New-Object Windows.Controls.Separator))
+$script:SoundItems = @{}
+function Set-SoundChoice([string]$choice) {
+  $script:S.soundChoice = $choice; Save-Settings
+  foreach ($k in @($script:SoundItems.Keys)) { $script:SoundItems[$k].IsChecked = ($k -eq $choice) }
+  Restart-Ringing
+}
+$script:SoundItems['phone'] = Add-MenuItem $soundMenu 'Phone ringtone' { Set-SoundChoice 'phone' } ($script:S.soundChoice -eq 'phone')
+$script:SoundItems['chime'] = Add-MenuItem $soundMenu 'Chime' { Set-SoundChoice 'chime' } ($script:S.soundChoice -eq 'chime')
+$script:SoundItems['custom'] = Add-MenuItem $soundMenu 'Your own sound file...' {
   $dialog = New-Object Microsoft.Win32.OpenFileDialog
   $dialog.Title = 'Sound for Mochi'
   $dialog.Filter = 'Sound files (*.wav;*.mp3;*.wma;*.m4a)|*.wav;*.mp3;*.wma;*.m4a|All files (*.*)|*.*'
-  if ($dialog.ShowDialog()) {
-    $script:S.soundFile = $dialog.FileName; Save-Settings
-    if ($script:IsRinging) { Set-Ringing $false; Update-State }
-  }
-})
-[void](Add-MenuItem $menu 'Use the default chime' {
-  $script:S.soundFile = $DefaultSound; Save-Settings
-  if ($script:IsRinging) { Set-Ringing $false; Update-State }
-})
-[void](Add-MenuItem $menu 'Play the sound once' { $script:Tester.Open((New-Object Uri (Get-SoundFile))); $script:Tester.Play() })
+  if ($dialog.ShowDialog()) { $script:S.soundFile = $dialog.FileName; Set-SoundChoice 'custom' }
+  else { Set-SoundChoice ([string]$script:S.soundChoice) }
+} ($script:S.soundChoice -eq 'custom')
+[void]$soundMenu.Items.Add((New-Object Windows.Controls.Separator))
+[void](Add-MenuItem $soundMenu 'Play it once' { $script:Tester.Open((New-Object Uri (Get-SoundFile))); $script:Tester.Play() })
+
 [void]$menu.Items.Add((New-Object Windows.Controls.Separator))
 [void](Add-MenuItem $menu 'Start when Claude starts' { param($item) $script:S.autoStart = $item.IsChecked; Save-Settings } ($script:S.autoStart -ne $false))
 [void](Add-MenuItem $menu 'Start with Windows' { param($item) Set-StartWithWindows $item.IsChecked } (Test-Path $StartupLink))
@@ -479,14 +625,22 @@ $petBox.ContextMenu = $menu
 
 Set-Scale ([double]$script:S.scale)
 $pet.Source = $script:Moods['sleeping'][0].bmp
+$script:Anim = ''
+$script:AnimSince = [Diagnostics.Stopwatch]::StartNew()
 
 $animation = New-Object Windows.Threading.DispatcherTimer
-$animation.Interval = [TimeSpan]::FromMilliseconds(40)
+$animation.Interval = [TimeSpan]::FromMilliseconds(30)
 $animation.Add_Tick({
   try {
-    $frames = $script:Moods[$script:Mood]
+    Step-Motion
+    $name = Get-Animation
+    if ($name -ne $script:Anim) { $script:Anim = $name; $script:AnimSince.Restart() }
+    $flip = if ($script:Walking) { $script:WalkDir } else { 1 }
+    if ($facing.ScaleX -ne $flip) { $facing.ScaleX = $flip }
+    $frames = $script:Moods[$name]
+    if ($null -eq $frames) { $frames = $script:Moods['idle'] }
     $total = 0; foreach ($f in $frames) { $total += $f.ms }
-    $t = $script:MoodSince.ElapsedMilliseconds % [Math]::Max(1, $total)
+    $t = $script:AnimSince.ElapsedMilliseconds % [Math]::Max(1, $total)
     foreach ($f in $frames) {
       if ($t -lt $f.ms) { if (-not [object]::ReferenceEquals($pet.Source, $f.bmp)) { $pet.Source = $f.bmp }; break }
       $t -= $f.ms
@@ -500,12 +654,13 @@ $poll.Add_Tick({ try { Update-State } catch { Write-Log "poll: $_" } })
 try { Update-State } catch { Write-Log "first poll: $_" }
 $animation.Start()
 $poll.Start()
-$win.Add_Closed({ Save-Settings; Write-Log 'quit' })
+$win.Add_Closed({ Save-Position; Write-Log 'quit' })
 
 # For testing: with MOCHI_SNAPSHOT set to a file prefix, save four pictures of the
 # window 1.5 s apart (<prefix>-1.png ...) and quit.
 if ($env:MOCHI_SNAPSHOT) {
   $script:Shots = 0
+  $script:NextWalk = 1000
   $snap = New-Object Windows.Threading.DispatcherTimer
   $snap.Interval = [TimeSpan]::FromMilliseconds(1500)
   $snap.Add_Tick({
@@ -518,11 +673,12 @@ if ($env:MOCHI_SNAPSHOT) {
       $png.Frames.Add([Windows.Media.Imaging.BitmapFrame]::Create($bmp))
       $out = [IO.File]::Create("$($env:MOCHI_SNAPSHOT)-$($script:Shots).png")
       $png.Save($out); $out.Close()
-      Write-Log "snapshot $($script:Shots): mood $($script:Mood), $($script:Attention.Count) lines, ringing $($script:IsRinging)"
+      Write-Log ("snapshot {0}: mood {1}, anim {2}, {3} lines, ringing {4}, at {5:0},{6:0}" -f $script:Shots, $script:Mood, $script:Anim, $script:Attention.Count, $script:IsRinging, $win.Left, $win.Top)
       if ($script:Shots -ge 4) { Set-Ringing $false; $win.Close() }
     } catch { Write-Log "snapshot: $_" }
   })
   $snap.Start()
 }
+
 [void]$win.ShowDialog()
 $script:Mutex.ReleaseMutex()

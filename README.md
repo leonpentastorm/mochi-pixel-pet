@@ -19,7 +19,10 @@ Mochi also lives on your Windows desktop, outside the Claude window, in a see-th
 - **One line above Mochi's head per chat that needs you**: "website: has a question!", "api-server: done ✓". Click a line to open that chat in the Claude app.
 - **Click Mochi** to open the chat that needs you most (or the one you used last) and hush the sound.
 - **Drag Mochi** anywhere; **resize** it with the corner grip or the mouse wheel.
-- **A sound loops** while a question waits or a finished chat is unseen. Right-click Mochi to turn the sound off, choose your own sound file (WAV, MP3, WMA, M4A), or go back to the built-in chime.
+- **Show chats in progress** (on by default): a fainter line for every chat Claude is working on. When nothing runs, or with it off, Mochi shows just itself.
+- **Wander around** (on by default): now and then, while idle, Mochi strolls left or right along its spot.
+- **DVD bounce mode**: Mochi flies about the screen, bouncing off every edge and changing fur color at each bounce. It parks while a chat needs you, and takes off again after.
+- **A sound loops** while a question waits or a finished chat is unseen. Right-click → **Sound** to turn it off or pick it: a ringtone of your own saved as `%USERPROFILE%\.claude\mochi\phone.mp3` (the default when it is there), the built-in chime, or any sound file (WAV, MP3, WMA, M4A).
 - Right-click also has size presets, **Start with Windows**, **Start when Claude starts**, and **Quit Mochi**.
 
 It needs nothing installed: it is a Windows PowerShell script (`desktop/mochi-desktop.ps1`). Sessions write their state to `%USERPROFILE%\.claude\mochi\sessions\`; Mochi's settings are in `%USERPROFILE%\.claude\mochi\desktop.json`.
