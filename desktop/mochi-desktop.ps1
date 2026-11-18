@@ -380,6 +380,7 @@ function Open-Session($s) {
   } else {
     $url = 'claude://code/continue?session=last&source=desktop_action'
   }
+  if ($env:MOCHI_SNAPSHOT) { Write-Log "test: would open $url"; return }  # tests never open the app
   try { Start-Process $url } catch { Write-Log "open failed: $_" }
 }
 
@@ -387,6 +388,20 @@ function Set-Seen($s) {
   $key = Get-Key $s
   $script:AckDone[$key] = [double]$s.finishedAt
   $script:AckAlert[$key] = [double]$s.alertSince
+}
+
+# A clicked line goes away until something new happens in that chat:
+# a new question, a new finished reply, or a new turn starting.
+$script:DismissAlert = @{}     # session -> alertSince whose line was clicked away
+$script:DismissProgress = @{}  # session -> startedAt whose "working" line was clicked away
+function Invoke-LineClick($line) {
+  $s = $line.session
+  $key = Get-Key $s
+  Set-Seen $s
+  if ($line.style -eq 'alert') { $script:DismissAlert[$key] = [double]$s.alertSince }
+  if ($line.style -eq 'progress') { $script:DismissProgress[$key] = [double]$s.startedAt }
+  Open-Session $s
+  Update-State
 }
 
 function New-Line([string]$text, $session, [string]$style) {
@@ -407,15 +422,12 @@ function New-Line([string]$text, $session, [string]$style) {
   $label.FontWeight = 'Bold'
   $label.FontSize = [Math]::Max(11, 7 + $script:S.scale * 1.4)
   $border.Child = $label
-  $border.Tag = $session
+  $border.Tag = [pscustomobject]@{ session = $session; style = $style }
   $border.Add_MouseLeftButtonUp({
     param($sender, $e)
     try {
       $e.Handled = $true
-      $s = $sender.Tag
-      Set-Seen $s
-      Open-Session $s
-      Update-State
+      Invoke-LineClick $sender.Tag
     } catch { Write-Log "line click: $_" }
   })
   return $border
@@ -506,12 +518,13 @@ function Update-State {
   foreach ($n in ($named | Sort-Object { [double]$_.s.alertSince })) {
     $s = $n.s
     if ($s.alert) {
-      # The line stays until the question is answered; the waving and the sound stop once
-      # seen or hushed.
-      $what = if ($s.alert -eq 'question') { 'has a question!' } else { 'needs your approval!' }
-      [void]$attention.Add([pscustomobject]@{ text = "$($n.name): $what"; session = $s; style = 'alert' })
+      # The line stays until the question is answered or you click it; the waving and the
+      # sound stop once seen or hushed.
       $key = Get-Key $s
       $since = [double]$s.alertSince
+      if ($since -le (Get-Ack $script:DismissAlert $key)) { continue }
+      $what = if ($s.alert -eq 'question') { 'has a question!' } else { 'needs your approval!' }
+      [void]$attention.Add([pscustomobject]@{ text = "$($n.name): $what"; session = $s; style = 'alert' })
       if ($since -gt (Get-Ack $script:AckAlert $key) -and $since -gt (Get-Ack $script:HushAlert $key)) {
         if ($watching -or $cameToFront) { $script:HushAlert[$key] = $since } else { $ring = $true; $ringAlert = $true }
       }
@@ -530,7 +543,7 @@ function Update-State {
   $needsYou = $attention.Count
   if ($script:S.showProgress) {
     foreach ($n in ($named | Sort-Object { [double]$_.s.startedAt })) {
-      if ($n.s.mood -eq 'working' -and -not $n.s.alert) {
+      if ($n.s.mood -eq 'working' -and -not $n.s.alert -and [double]$n.s.startedAt -gt (Get-Ack $script:DismissProgress (Get-Key $n.s))) {
         [void]$attention.Add([pscustomobject]@{ text = "$($n.name): working" + [char]0x2026; session = $n.s; style = 'progress' })
       }
     }
@@ -938,6 +951,10 @@ if ($env:MOCHI_SNAPSHOT) {
       $out = [IO.File]::Create("$($env:MOCHI_SNAPSHOT)-$($script:Shots).png")
       $png.Save($out); $out.Close()
       Write-Log ("snapshot {0}: mood {1}, anim {2}, {3} lines, ringing {4}, at {5:0},{6:0}, $($script:FrontState)" -f $script:Shots, $script:Mood, $script:Anim, $script:Attention.Count, $script:IsRinging, $win.Left, $win.Top)
+      if ($env:MOCHI_TEST_CLICK -and $script:Shots -eq [int]$env:MOCHI_TEST_CLICK -and $script:Attention.Count -gt 0) {
+        Write-Log "test: clicking the line '$($script:Attention[0].text)'"
+        Invoke-LineClick $script:Attention[0]
+      }
       if ($script:Shots -ge $script:ShotCount) { Set-Ringing $false; $win.Close() }
     } catch { Write-Log "snapshot: $_" }
   })
