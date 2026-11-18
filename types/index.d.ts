@@ -17,6 +17,11 @@ export type PetState = {
   /** Epoch ms of the last activity, for falling asleep. */
   lastActive: number
   asleep: boolean
+  /** When the current alert began (epoch ms), 0 without one. */
+  alertSince: number
+  /** When the last main-thread turn started, and finished with an answer (epoch ms). */
+  startedAt: number
+  finishedAt: number
 }
 
 declare module 'claude-code' {

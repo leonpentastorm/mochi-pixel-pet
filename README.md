@@ -12,6 +12,18 @@ The button under Mochi pets it, or during an alert, takes you to the question: i
 
 Type `/pet` to bring the panel back if you close it.
 
+## Mochi on your desktop (Windows)
+
+Mochi also lives on your Windows desktop, outside the Claude window, in a see-through window that stays on top. It starts by itself when a Claude Code session starts; each session reports how it is doing, and the desktop Mochi shows the busiest of them:
+
+- **One line above Mochi's head per chat that needs you**: "website: has a question!", "api-server: done ✓". Click a line to open that chat in the Claude app.
+- **Click Mochi** to open the chat that needs you most (or the one you used last) and hush the sound.
+- **Drag Mochi** anywhere; **resize** it with the corner grip or the mouse wheel.
+- **A sound loops** while a question waits or a finished chat is unseen. Right-click Mochi to turn the sound off, choose your own sound file (WAV, MP3, WMA, M4A), or go back to the built-in chime.
+- Right-click also has size presets, **Start with Windows**, **Start when Claude starts**, and **Quit Mochi**.
+
+It needs nothing installed: it is a Windows PowerShell script (`desktop/mochi-desktop.ps1`). Sessions write their state to `%USERPROFILE%\.claude\mochi\sessions\`; Mochi's settings are in `%USERPROFILE%\.claude\mochi\desktop.json`.
+
 ## Install
 
 At the prompt of a Claude Code terminal session:

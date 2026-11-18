@@ -92,6 +92,8 @@ type Pose = {
   arms?: Arm[]
   laptop?: { leftPawUp: boolean; light: boolean; dot: number }
   sparkles?: boolean
+  /** Floating Z's at this step (0-7), for pictures that animate frame by frame. */
+  zs?: number
 }
 
 type Grid = Map<string, string>
@@ -133,6 +135,13 @@ function compose(p: Pose): Grid {
     ;[4, 7, 10].forEach((x, i) => stamp(g, ['cc', 'cc'], fx + x, fy - 4, { c: i === p.laptop!.dot ? 'Y' : 'y' }))
   }
   if (p.sparkles) for (const [x, y] of SPARKLE_AT) stamp(g, SPARKLE, fx + x, fy + y)
+  if (p.zs !== undefined) {
+    // Two Z's drifting up and to the right, half a cycle apart; each vanishes at its top.
+    for (const [shape, x, y, offset] of [[Z_SMALL, 15, -1, 0], [Z_BIG, 16, -3, 4]] as const) {
+      const step = (p.zs + offset) % 8
+      if (step < 7) stamp(g, shape, fx + x + Math.floor(step / 2), fy + y - Math.floor(step * 1.6))
+    }
+  }
   return g
 }
 
@@ -296,6 +305,57 @@ export const SVG: Record<Mood, string> = {
   sleeping: svgFor('sleeping'),
   happy: svgFor('happy'),
   alert: svgFor('alert'),
+}
+
+/** The poses the desktop pet steps through: as in the chat, with the Z's drawn into the frames. */
+function desktopPoses(mood: Mood): Pose[] {
+  if (mood !== 'sleeping') return POSES[mood]
+  const base = POSES.sleeping[0]!
+  return [0, 1, 2, 3, 4, 5, 6, 7].map(i => ({ ...base, ms: 375, breath: i < 4 ? 1 : 2, zs: i }))
+}
+
+/**
+ * Every frame of every mood as pixel rows, for the desktop pet program: one
+ * character per pixel ('.' clear), each character a color in `palette` written
+ * #AARRGGBB. Characters are digits and capitals only, so a case-blind reader
+ * cannot mix two of them up.
+ */
+export function desktopFramesJson(): string {
+  const keys = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+  const charOf = new Map<string, string>()
+  const palette: Record<string, string> = {}
+  const toArgb = (hex: string) => {
+    const h = hex.replace('#', '')
+    return `#${h.length === 8 ? h.slice(6) : 'ff'}${h.slice(0, 6)}`.toUpperCase()
+  }
+  const moods: Record<string, { ms: number; rows: string[] }[]> = {}
+  for (const mood of ['idle', 'working', 'sleeping', 'happy', 'alert'] as const) {
+    moods[mood] = desktopPoses(mood).map(p => {
+      const g = compose(p)
+      const rows: string[] = []
+      for (let y = 0; y < CH; y++) {
+        let row = ''
+        for (let x = 0; x < CW; x++) {
+          const c = g.get(`${x},${y}`)
+          if (c === undefined) {
+            row += '.'
+            continue
+          }
+          const argb = toArgb(PAL[c] ?? c)
+          let ch = charOf.get(argb)
+          if (ch === undefined) {
+            ch = keys[charOf.size] ?? '.'
+            charOf.set(argb, ch)
+            palette[ch] = argb
+          }
+          row += ch
+        }
+        rows.push(row)
+      }
+      return { ms: p.ms, rows }
+    })
+  }
+  return JSON.stringify({ version: 1, width: CW, height: CH, palette, moods })
 }
 
 /** One run of half-block cells sharing colors, for the terminal. */

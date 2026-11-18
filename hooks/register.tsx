@@ -4,6 +4,8 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { PetAlert, PetState } from '../types'
 import { cellRows, SVG } from './art'
 import type { Mood } from './art'
+import { launchDesktopPet, openDesktop, report } from './desktop'
+import type { Desktop } from './desktop'
 
 const PANE = 'pixel-pet'
 const TITLE = 'Mochi'
@@ -23,8 +25,11 @@ const INITIAL: PetState = {
   happyUntil: 0,
   lastActive: 0,
   asleep: false,
+  alertSince: 0,
+  startedAt: 0,
+  finishedAt: 0,
 }
-const pet = atom({ plugin: 'pixel-pet', key: 'pet' } as const, INITIAL, { shape: 'pet-1' })
+const pet = atom({ plugin: 'pixel-pet', key: 'pet' } as const, INITIAL, { shape: 'pet-2' })
 const tick = atom({ plugin: 'pixel-pet', key: 'tick' } as const, 0)
 
 type $ = EngineInterface
@@ -61,8 +66,11 @@ let isNoticeOut = false
 
 async function raise($: $, alert: PetAlert) {
   const wasQuiet = (await read($, pet)).alerts.length === 0
+  const now = await $.clock.now()
   await wake($, s =>
-    s.alerts.some(a => a.id === alert.id && a.id !== '') ? s : { ...s, alerts: [...s.alerts, alert] },
+    s.alerts.some(a => a.id === alert.id && a.id !== '')
+      ? s
+      : { ...s, alerts: [...s.alerts, alert], alertSince: s.alerts.length === 0 ? now : s.alertSince },
   )
   if (wasQuiet && !isNoticeOut) {
     isNoticeOut = true
@@ -157,6 +165,22 @@ async function housekeeping($: $) {
   }
 }
 
+/** Where this session reports to the desktop pet, once session.start has worked it out. */
+let sessionDesktop: Desktop | undefined
+
+async function reportState($: $, desktop: Desktop) {
+  const s = await read($, pet)
+  const now = await $.clock.now()
+  const alert = s.alerts[s.alerts.length - 1]
+  await report($, desktop, now, {
+    mood: moodOf(s, now),
+    alert: alert ? alert.kind : null,
+    alertSince: alert ? s.alertSince : 0,
+    startedAt: s.startedAt,
+    finishedAt: s.finishedAt,
+  })
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'pet', description: 'Show Mochi, your pixel pet, beside the chat' })
@@ -166,15 +190,37 @@ export const register: Register = on => {
     const now = await $.clock.now()
     await update($, pet, s => ({ ...s, busy: false, tools: 0, alerts: [], asleep: false, lastActive: now }))
 
+    // The desktop pet: share the art, start the pet, then report this session's state.
+    const desktop = await openDesktop($).catch(() => undefined)
+    if (desktop) void launchDesktopPet($, desktop).catch(() => undefined)
+
     let n = 0
     $.clock.every(250, () => {
       n++
       void (async () => {
         if (n % 4 === 0) await housekeeping($)
+        if (desktop) await reportState($, desktop)
         // Only the terminal needs frames pushed; SVG surfaces animate by themselves.
         if ((await $.session.surfaces()).includes('terminal')) await update($, tick, t => (t + 1) % 1_000_000)
       })()
     })
+    sessionDesktop = desktop
+    return next(e)
+  })
+
+  on('session.end', async ($, e, next) => {
+    const desktop = sessionDesktop
+    if (desktop) {
+      const now = await $.clock.now()
+      await report($, desktop, now, {
+        mood: 'sleeping',
+        alert: null,
+        alertSince: 0,
+        startedAt: 0,
+        finishedAt: 0,
+        ended: true,
+      }).catch(() => undefined)
+    }
     return next(e)
   })
 
@@ -184,7 +230,10 @@ export const register: Register = on => {
   })
 
   on('turn.start', async ($, e, next) => {
-    if (!e.agentId) await wake($, s => ({ ...s, busy: true, happyUntil: 0 }))
+    if (!e.agentId) {
+      const now = await $.clock.now()
+      await wake($, s => ({ ...s, busy: true, happyUntil: 0, startedAt: now }))
+    }
     return next(e)
   })
 
@@ -201,6 +250,8 @@ export const register: Register = on => {
         asleep: false,
         lastActive: now,
         happyUntil: e.reason === 'answer' ? now + HAPPY_MS : 0,
+        finishedAt: e.reason === 'answer' ? now : s.finishedAt,
+        alertSince: 0,
       }))
       await quiet($)
     }
