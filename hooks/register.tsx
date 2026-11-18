@@ -168,6 +168,18 @@ async function housekeeping($: $) {
 /** Where this session reports to the desktop pet, once session.start has worked it out. */
 let sessionDesktop: Desktop | undefined
 
+/**
+ * When the person last had this chat in front of them (epoch ms): one of its
+ * messages on screen, a key in its prompt box, a press. The desktop pet stops
+ * ringing for this chat once it sees this move past the alert while the
+ * Claude window is in front.
+ */
+let seenAt = 0
+async function markSeen($: $) {
+  const now = await $.clock.now()
+  if (now - seenAt >= 1_000) seenAt = now
+}
+
 async function reportState($: $, desktop: Desktop) {
   const s = await read($, pet)
   const now = await $.clock.now()
@@ -178,6 +190,7 @@ async function reportState($: $, desktop: Desktop) {
     alertSince: alert ? s.alertSince : 0,
     startedAt: s.startedAt,
     finishedAt: s.finishedAt,
+    seenAt,
   })
 }
 
@@ -315,10 +328,38 @@ export const register: Register = on => {
   on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
     lastAssistantId = e.requestId
     remember(e.requestId)
+    if (e.props.onScreen) void markSeen($)
     return next(e)
   })
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
     remember(e.requestId)
+    if (e.props.onScreen) void markSeen($)
+    return next(e)
+  })
+  // The person has this chat open: any of its transcript rows drawn on screen.
+  on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
+    if (e.props.onScreen) void markSeen($)
+    return next(e)
+  })
+  on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
+    if (e.props.onScreen) void markSeen($)
+    return next(e)
+  })
+  on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
+    if (e.props.onScreen) void markSeen($)
+    return next(e)
+  })
+  on('ui.render', { component: 'TurnDuration' }, async ($, e, next) => {
+    if (e.props.onScreen) void markSeen($)
+    return next(e)
+  })
+  // ...or is typing in its prompt box, or pressing Mochi's button.
+  on('prompt.edit', async ($, e, next) => {
+    void markSeen($)
+    return next(e)
+  })
+  on('ui.press', async ($, e, next) => {
+    void markSeen($)
     return next(e)
   })
   on('ui.render', { component: 'AskUserQuestion' }, async ($, e, next) => {

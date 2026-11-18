@@ -27,6 +27,8 @@ export type SessionReport = {
   /** When the last turn started and finished (epoch ms). */
   startedAt: number
   finishedAt: number
+  /** When the person last had this chat in front of them (epoch ms): its messages on screen, typing, a press. */
+  seenAt?: number
   /** When this file was written: the pet drops a session it has not heard from in a while. */
   updated: number
   ended?: true

@@ -16,7 +16,42 @@
 # Kept to ASCII: Windows PowerShell 5.1 reads a script without a BOM as ANSI.
 
 $ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml, System.Windows.Forms, System.Drawing
+
+# Two things WPF can't do by itself: keep Mochi out of Alt+Tab, and tell which app is in front.
+if (-not ('MochiNative' -as [type])) {
+  Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class MochiNative {
+  [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+  [DllImport("user32.dll", EntryPoint = "GetWindowLongPtr")] static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int index);
+  [DllImport("user32.dll", EntryPoint = "SetWindowLongPtr")] static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int index, IntPtr value);
+  [DllImport("user32.dll", EntryPoint = "GetWindowLong")] static extern int GetWindowLong32(IntPtr hWnd, int index);
+  [DllImport("user32.dll", EntryPoint = "SetWindowLong")] static extern int SetWindowLong32(IntPtr hWnd, int index, int value);
+  const int GWL_EXSTYLE = -20;
+  const long WS_EX_TOOLWINDOW = 0x80, WS_EX_APPWINDOW = 0x40000;
+
+  // The process name of the window in front ("Claude" for the Claude app), or "".
+  public static string ForegroundProcess() {
+    IntPtr h = GetForegroundWindow();
+    if (h == IntPtr.Zero) return "";
+    uint pid; GetWindowThreadProcessId(h, out pid);
+    try { return System.Diagnostics.Process.GetProcessById((int)pid).ProcessName; } catch { return ""; }
+  }
+
+  // A tool window: Windows leaves it out of Alt+Tab and the taskbar.
+  public static bool HideFromAltTab(IntPtr h) {
+    long ex = IntPtr.Size == 8 ? GetWindowLongPtr(h, GWL_EXSTYLE).ToInt64() : GetWindowLong32(h, GWL_EXSTYLE);
+    ex = (ex | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW;
+    if (IntPtr.Size == 8) SetWindowLongPtr(h, GWL_EXSTYLE, new IntPtr(ex)); else SetWindowLong32(h, GWL_EXSTYLE, (int)ex);
+    long now = IntPtr.Size == 8 ? GetWindowLongPtr(h, GWL_EXSTYLE).ToInt64() : GetWindowLong32(h, GWL_EXSTYLE);
+    return (now & WS_EX_TOOLWINDOW) != 0;
+  }
+}
+'@
+}
 
 $Dir = Join-Path $env:USERPROFILE '.claude\mochi'
 $SessionsDir = Join-Path $Dir 'sessions'
@@ -183,6 +218,18 @@ $pet = $win.FindName('Pet')
 $facing = $win.FindName('Facing')
 $grip = $win.FindName('Grip')
 
+# Mochi's face, for the window, the tray and the startup shortcut.
+$IconFile = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\assets\mochi.ico'))
+if (Test-Path $IconFile) {
+  try { $win.Icon = [Windows.Media.Imaging.BitmapFrame]::Create((New-Object Uri $IconFile)) } catch { Write-Log "window icon: $_" }
+}
+$win.Add_SourceInitialized({
+  try {
+    $hwnd = (New-Object Windows.Interop.WindowInteropHelper $win).Handle
+    Write-Log "hidden from Alt+Tab: $([MochiNative]::HideFromAltTab($hwnd))"
+  } catch { Write-Log "alt-tab: $_" }
+})
+
 function New-Brush([string]$color) { New-Object Windows.Media.SolidColorBrush([Windows.Media.ColorConverter]::ConvertFromString($color)) }
 $Ink = New-Brush '#2D1E3A'
 $Faded = New-Brush '#6B5F78'
@@ -262,6 +309,13 @@ $script:Tester = New-Object Windows.Media.MediaPlayer
 $script:Cache = @{}        # file -> last good report, so a half-written file never blinks a session away
 $script:AckDone = @{}      # session -> finishedAt you have seen
 $script:AckAlert = @{}     # session -> alertSince you have seen
+$script:LastSeen = @{}     # session -> the last seenAt it reported
+
+# Whether the Claude app's window is the one in front (MOCHI_TEST_FOREGROUND=1 pretends so, for tests).
+function Test-ClaudeInFront {
+  if ($env:MOCHI_TEST_FOREGROUND) { return $true }
+  try { return [MochiNative]::ForegroundProcess() -eq 'Claude' } catch { return $false }
+}
 $script:FirstPoll = $true
 $script:ProjectNo = @{}    # session -> its "Project N" number, for chats with no real folder
 $script:ProjectCount = 0
@@ -375,6 +429,19 @@ function Update-State {
     foreach ($s in $sessions) { Set-Seen $s }
     $script:FirstPoll = $false
   }
+
+  # You opened the chat yourself: once it reports being on screen after its alert or
+  # reply, with the Claude window in front, that counts as seen. No need to click Mochi.
+  $inFront = Test-ClaudeInFront
+  foreach ($s in $sessions) {
+    $key = Get-Key $s
+    $seen = [double]$s.seenAt
+    if ($seen -le (Get-Ack $script:LastSeen $key)) { continue }
+    $script:LastSeen[$key] = $seen
+    if (-not $inFront) { continue }
+    if ($s.alert -and $seen -ge [double]$s.alertSince) { $script:AckAlert[$key] = [double]$s.alertSince }
+    if ([double]$s.finishedAt -gt 0 -and $seen -ge [double]$s.finishedAt) { $script:AckDone[$key] = [double]$s.finishedAt }
+  }
   $script:Sessions = $sessions
 
   # Names: a chat with no real project folder (the app's scratch folders) is
@@ -406,18 +473,22 @@ function Update-State {
 
   $attention = New-Object System.Collections.ArrayList
   $ring = $false
+  $unseenAlert = $false
+  $donePending = 0
   foreach ($n in ($named | Sort-Object { [double]$_.s.alertSince })) {
     $s = $n.s
     if ($s.alert) {
+      # The line stays until the question is answered; the waving and the sound stop once seen.
       $what = if ($s.alert -eq 'question') { 'has a question!' } else { 'needs your approval!' }
       [void]$attention.Add([pscustomobject]@{ text = "$($n.name): $what"; session = $s; style = 'alert' })
-      if ([double]$s.alertSince -gt (Get-Ack $script:AckAlert (Get-Key $s))) { $ring = $true }
+      if ([double]$s.alertSince -gt (Get-Ack $script:AckAlert (Get-Key $s))) { $ring = $true; $unseenAlert = $true }
     }
   }
   foreach ($n in ($named | Sort-Object { - [double]$_.s.finishedAt })) {
     if (Test-DonePending $n.s) {
       [void]$attention.Add([pscustomobject]@{ text = "$($n.name): done " + [char]0x2713; session = $n.s; style = 'done' })
       $ring = $true
+      $donePending++
     }
   }
   $needsYou = $attention.Count
@@ -433,8 +504,8 @@ function Update-State {
 
   $mood = 'idle'
   if ($sessions.Count -eq 0) { $mood = 'sleeping' }
-  elseif (@($sessions | Where-Object { $_.alert }).Count -gt 0) { $mood = 'alert' }
-  elseif ($needsYou -gt 0) { $mood = 'happy' }
+  elseif ($unseenAlert) { $mood = 'alert' }
+  elseif ($donePending -gt 0) { $mood = 'happy' }
   elseif (@($sessions | Where-Object { $_.mood -eq 'working' }).Count -gt 0) { $mood = 'working' }
   elseif (@($sessions | Where-Object { $_.mood -ne 'sleeping' }).Count -eq 0) { $mood = 'sleeping' }
   $script:Mood = $mood
@@ -687,6 +758,7 @@ function Set-StartWithWindows([bool]$on) {
     $link.Arguments = "-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$PSCommandPath`""
     $link.WindowStyle = 7
     $link.Description = 'Mochi, the Claude desktop pet'
+    if (Test-Path $IconFile) { $link.IconLocation = "$IconFile,0" }
     $link.Save()
   } elseif (Test-Path $StartupLink) {
     Remove-Item -LiteralPath $StartupLink
@@ -787,7 +859,28 @@ $poll.Add_Tick({ try { Update-State } catch { Write-Log "poll: $_" } })
 try { Update-State } catch { Write-Log "first poll: $_" }
 $animation.Start()
 $poll.Start()
-$win.Add_Closed({ Save-Position; Write-Log 'quit' })
+# A tray icon with Mochi's face: Mochi has no taskbar button and stays out of Alt+Tab,
+# so this is where to find it. Left-click hides or shows it; right-click for the menu.
+$script:Tray = New-Object System.Windows.Forms.NotifyIcon
+try { $script:Tray.Icon = if (Test-Path $IconFile) { New-Object System.Drawing.Icon($IconFile) } else { [System.Drawing.SystemIcons]::Application } } catch { Write-Log "tray icon: $_" }
+$script:Tray.Text = 'Mochi'
+function Switch-Visible { if ($win.IsVisible) { $win.Hide() } else { $win.Show(); Apply-Anchor } }
+$trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
+[void]$trayMenu.Items.Add('Show or hide Mochi', $null, { try { Switch-Visible } catch { Write-Log "tray: $_" } })
+[void]$trayMenu.Items.Add('Open Claude', $null, { Open-Session $null })
+[void]$trayMenu.Items.Add('-')
+[void]$trayMenu.Items.Add('Quit Mochi', $null, { Set-Ringing $false; $win.Close() })
+$script:Tray.ContextMenuStrip = $trayMenu
+$script:Tray.Add_MouseClick({ param($sender, $e) if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) { try { Switch-Visible } catch { Write-Log "tray: $_" } } })
+$script:Tray.Visible = $true
+
+$win.Add_Closed({
+  Save-Position
+  $script:Tray.Visible = $false
+  $script:Tray.Dispose()
+  Write-Log 'quit'
+  [Windows.Threading.Dispatcher]::CurrentDispatcher.InvokeShutdown()
+})
 
 # For testing: with MOCHI_SNAPSHOT set to a file prefix, save MOCHI_SNAPSHOT_COUNT
 # pictures of the window (4 by default) MOCHI_SNAPSHOT_MS apart (1500 by default),
@@ -815,5 +908,7 @@ if ($env:MOCHI_SNAPSHOT) {
   $snap.Start()
 }
 
-[void]$win.ShowDialog()
+# Show, then run the message loop until Mochi quits (not ShowDialog: hiding a dialog would end it).
+$win.Show()
+[Windows.Threading.Dispatcher]::Run()
 $script:Mutex.ReleaseMutex()
