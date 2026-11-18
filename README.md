@@ -32,10 +32,20 @@ It needs nothing installed: it is a Windows PowerShell script (`desktop/mochi-de
 
 ## Install
 
+### The easy way: ask Claude
+
+Paste this into any Claude Code chat (terminal, desktop app or IDE):
+
+> Install the Mochi pixel pet for me: run `claude plugin marketplace add leonpentastorm/mochi-pixel-pet` and then `claude plugin install pixel-pet@mochi-pixel-pet --scope user`.
+
+Claude runs the two commands; Mochi shows up in every Claude Code chat you start after that (and, on Windows, on your desktop).
+
+### Or do it yourself
+
 At the prompt of a Claude Code terminal session:
 
 ```
-/plugin install pixel-pet --marketplace YOUR-USERNAME/mochi-pixel-pet
+/plugin install pixel-pet --marketplace leonpentastorm/mochi-pixel-pet
 ```
 
 Answer `y` to add the marketplace, then press Enter to pick the user scope.
@@ -43,7 +53,34 @@ Answer `y` to add the marketplace, then press Enter to pick the user scope.
 From a shell:
 
 ```
-claude plugin install pixel-pet --marketplace YOUR-USERNAME/mochi-pixel-pet
+claude plugin marketplace add leonpentastorm/mochi-pixel-pet
+claude plugin install pixel-pet@mochi-pixel-pet --scope user
 ```
 
-In the desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `YOUR-USERNAME/mochi-pixel-pet`, then **Add plugin**.
+In the Claude desktop app: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `leonpentastorm/mochi-pixel-pet`, then **Add plugin** and pick **pixel-pet**.
+
+Start a new chat afterwards: Mochi loads when a session starts.
+
+### Updating and removing
+
+```
+claude plugin marketplace update mochi-pixel-pet
+claude plugin update pixel-pet@mochi-pixel-pet
+```
+
+```
+claude plugin uninstall pixel-pet@mochi-pixel-pet
+claude plugin marketplace remove mochi-pixel-pet
+```
+
+To stop the desktop Mochi from starting with Claude without uninstalling, right-click it and untick **Start when Claude starts**.
+
+### For Claude: installing this plugin
+
+If a person asks you to install Mochi from this repository, run, in order:
+
+1. `claude plugin marketplace add leonpentastorm/mochi-pixel-pet` (adds this repository as a plugin marketplace named `mochi-pixel-pet`)
+2. `claude plugin install pixel-pet@mochi-pixel-pet --scope user` (installs the `pixel-pet` plugin for all their sessions)
+3. `claude plugin list` and check that `pixel-pet@mochi-pixel-pet` shows **enabled**.
+
+Then tell them to start a new chat to see Mochi. If `claude` is not on the PATH (a desktop-app-only setup), give them the desktop-app steps above instead. Mochi needs a Claude Code version with plugin hooks modules (function hooks); the desktop pet part needs Windows and Windows PowerShell 5.1, both standard on Windows 10 and 11.

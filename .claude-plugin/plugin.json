@@ -1,6 +1,6 @@
 {
   "name": "pixel-pet",
-  "version": "0.1.0",
-  "description": "Mochi, an animated pixel-art pet beside the chat that idles, works, sleeps, cheers and waves when Claude has a question.",
+  "version": "0.2.0",
+  "description": "Mochi, an animated pixel-art pet beside the chat and on your Windows desktop: idles, works, sleeps, cheers, and waves when Claude has a question.",
   "types": "./types/index.d.ts"
 }

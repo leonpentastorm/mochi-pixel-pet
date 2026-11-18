@@ -1,5 +1,6 @@
 {
   "name": "mochi-pixel-pet",
-  "owner": { "name": "YOUR-USERNAME" },
+  "owner": { "name": "leonpentastorm" },
+  "description": "Mochi, an animated pixel-art pet for Claude Code",
   "plugins": [{ "name": "pixel-pet", "source": "./" }]
 }
