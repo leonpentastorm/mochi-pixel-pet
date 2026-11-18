@@ -1,0 +1,5 @@
+{
+  "name": "mochi-pixel-pet",
+  "owner": { "name": "YOUR-USERNAME" },
+  "plugins": [{ "name": "pixel-pet", "source": "./" }]
+}
