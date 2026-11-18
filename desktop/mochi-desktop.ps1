@@ -34,7 +34,8 @@ function Write-Log([string]$message) {
 
 # One Mochi at a time: every Claude session tries to start one.
 $isFirst = $false
-$script:Mutex = New-Object System.Threading.Mutex($true, 'Local\MochiDesktopPet', [ref]$isFirst)
+$lockName = if ($env:MOCHI_SNAPSHOT) { 'Local\MochiDesktopPetTest' } else { 'Local\MochiDesktopPet' }
+$script:Mutex = New-Object System.Threading.Mutex($true, $lockName, [ref]$isFirst)
 if (-not $isFirst) { return }
 Write-Log 'started'
 
@@ -625,13 +626,21 @@ function Step-Motion {
   }
 }
 
+# Being dragged about by the cursor: once a press has moved Mochi, not on a plain click.
+$script:DragFrom = $null
+function Test-Grabbed {
+  if ($null -eq $script:DragFrom) { return $false }
+  return [Math]::Abs($win.Left - $script:DragFrom[0]) -ge 3 -or [Math]::Abs($win.Top - $script:DragFrom[1]) -ge 3
+}
+
 function Get-Animation {
+  if (Test-Grabbed) { return "hold$($script:Tint)" }
   if ($script:Bouncing) { if ($script:Held) { return "hold$($script:Tint)" }; return "bounce$($script:Tint)" }
   if ($script:Act) { return $script:Act }
   return (Get-Mood)
 }
 
-function Get-Facing { if ($script:Act -and -not $script:Bouncing) { return $script:Dir }; return 1 }
+function Get-Facing { if ($script:Act -and -not $script:Bouncing -and -not (Test-Grabbed)) { return $script:Dir }; return 1 }
 
 # ---------------------------------------------------------------- input
 
@@ -640,7 +649,8 @@ $pet.Add_MouseLeftButtonDown({
   try {
     $left = $win.Left; $top = $win.Top
     $script:Dragging = $true
-    try { $win.DragMove() } finally { $script:Dragging = $false }
+    $script:DragFrom = @($left, $top)
+    try { $win.DragMove() } finally { $script:Dragging = $false; $script:DragFrom = $null }
     if ([Math]::Abs($win.Left - $left) -lt 3 -and [Math]::Abs($win.Top - $top) -lt 3) {
       Invoke-PetClick
     } else {

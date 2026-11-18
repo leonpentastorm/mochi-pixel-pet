@@ -18,7 +18,7 @@ Mochi also lives on your Windows desktop, outside the Claude window, in a see-th
 
 - **One line above Mochi's head per chat that needs you**: "website: has a question!", "api-server: done ✓". Click a line to open that chat in the Claude app.
 - **Click Mochi** to open the chat that needs you most (or the one you used last) and hush the sound.
-- **Drag Mochi** anywhere; **resize** it with the corner grip or the mouse wheel.
+- **Drag Mochi** anywhere (it hangs on to the cursor with both paws while you carry it); **resize** it with the corner grip or the mouse wheel.
 - **Show chats in progress** (on by default): a fainter line for every chat Claude is working on. When nothing runs, or with it off, Mochi shows just itself.
 - **Names**: a line names the chat's project folder. Chats with no real folder are "Project 1", "Project 2"...; chats sharing a folder are told apart as "#1", "#2".
 - **Wander around** (on by default): now and then, while idle, Mochi walks off left or right until it slams into the edge of the screen, falls over seeing stars, gets up, licks its paw, then either walks back the other way or stands about for a while.
