@@ -237,9 +237,22 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('command.run', { command: 'pet' }, async $ => {
+  on('command.run', { command: 'pet' }, async ($, e) => {
+    if (e.args.trim().toLowerCase() === 'desktop') {
+      // Starts the desktop pet only for the person: typed at the prompt, from the app,
+      // or over Remote Control; never for another plugin, peer or channel.
+      if (!['composer', 'bridge', 'sdk'].includes(e.origin.kind)) return { text: 'Only you can start desktop Mochi: type /pet desktop yourself.' }
+      const desktop = sessionDesktop
+      if (!desktop || desktop.link) return { text: 'Desktop Mochi runs on the PC it shows on; this session reports to it through the link.' }
+      const started = await launchDesktopPet($, desktop, true).catch(() => false)
+      return {
+        text: started
+          ? 'Starting desktop Mochi (Windows PowerShell running desktop/mochi-desktop.ps1 from this plugin). Right-click it for settings, including "Start when Claude starts".'
+          : 'Desktop Mochi needs Windows PowerShell, which this computer could not start.',
+      }
+    }
     await $.ui.open({ id: PANE, title: TITLE })
-    return { text: 'Mochi is beside the chat.' }
+    return { text: 'Mochi is beside the chat. Type /pet desktop to also put it on your Windows desktop.' }
   })
 
   on('turn.start', async ($, e, next) => {

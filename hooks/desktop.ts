@@ -122,15 +122,26 @@ export async function openDesktop($: $): Promise<Desktop | undefined> {
   return desktop
 }
 
-/** Starts the desktop pet unless the person turned that off; the pet itself refuses a second copy. */
-export async function launchDesktopPet($: $, desktop: Desktop) {
+/**
+ * Starts the desktop pet: when the person typed `/pet desktop` (`asked`), or at a
+ * session's start once they turned on "Start when Claude starts" (`launchWithClaude`,
+ * off until they do). Never on its own otherwise. The pet refuses a second copy.
+ *
+ * It runs this plugin's own desktop/mochi-desktop.ps1 in Windows PowerShell, its
+ * console window hidden (the pet is a WPF window of its own). `-ExecutionPolicy Bypass`
+ * applies to that one process only: Windows' default policy refuses any unsigned
+ * script, this one included. Resolves true once PowerShell took the request.
+ */
+export async function launchDesktopPet($: $, desktop: Desktop, asked = false): Promise<boolean> {
   // A linked session runs away from the pet's PC: there is no pet to start here.
-  if (desktop.link) return
-  const settings = await $.fs.read(join(desktop.dir, 'desktop.json')).catch(() => '')
-  try {
-    if (settings && JSON.parse(settings.replace(/^﻿/, '')).autoStart === false) return
-  } catch {
-    // Unreadable settings: start as by default.
+  if (desktop.link) return false
+  if (!asked) {
+    const settings = await $.fs.read(join(desktop.dir, 'desktop.json')).catch(() => '')
+    try {
+      if (!settings || JSON.parse(settings.replace(/^﻿/, '')).launchWithClaude !== true) return false
+    } catch {
+      return false
+    }
   }
   const script = join($.plugin.root, 'desktop', 'mochi-desktop.ps1')
   const quoted = script.replace(/'/g, "''")
@@ -145,6 +156,7 @@ export async function launchDesktopPet($: $, desktop: Desktop) {
     ],
     { timeoutMs: 20_000 },
   )
+  return true
 }
 
 /**

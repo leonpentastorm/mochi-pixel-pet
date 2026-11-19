@@ -113,3 +113,21 @@ test('link.json without send:true leaves the session local', async ($, on) => {
   await clock.advance(30_000)
   expect(sent).toEqual([])
 })
+
+test('desktop Mochi never starts on its own', async ($, on) => {
+  const { clock, launched } = setup(on, { USERPROFILE: 'C:\Users\me' }, {
+    '/.claude/mochi/desktop.json': JSON.stringify({ autoStart: true }),
+  })
+  await $.session.start({ cwd: 'C:\Users\me\my-repo', surface: 'desktop', isInteractive: true })
+  await clock.advance(5_000)
+  expect(launched()).toBe(false)
+})
+
+test('desktop Mochi starts with Claude once the person turned that on', async ($, on) => {
+  const { clock, launched } = setup(on, { USERPROFILE: 'C:\Users\me' }, {
+    '/.claude/mochi/desktop.json': JSON.stringify({ launchWithClaude: true }),
+  })
+  await $.session.start({ cwd: 'C:\Users\me\my-repo', surface: 'desktop', isInteractive: true })
+  await clock.advance(5_000)
+  expect(launched()).toBe(true)
+})

@@ -16,7 +16,7 @@ Type `/pet` to bring the panel back if you close it.
 
 ## Mochi on your desktop (Windows)
 
-Mochi also lives on your Windows desktop, outside the Claude window, in a see-through window that stays on top. It starts by itself when a Claude Code session starts; each session reports how it is doing, and the desktop Mochi shows the busiest of them:
+Mochi can also live on your Windows desktop, outside the Claude window, in a see-through window that stays on top. It never starts by itself: type `/pet desktop` in a Claude chat to start it. Each session reports how it is doing, and the desktop Mochi shows the busiest of them:
 
 - **One line above Mochi's head per chat that needs you**: "website: has a question!", "api-server: done ✓". Click a line to open that chat in the Claude app; the line clears until something new happens there.
 - **Click Mochi** to open the chat that needs you most (or the one you used last) and hush the sound. Going to the Claude window yourself hushes it too: the waving and the sound stop as soon as Claude is in front, while the line stays until you answer, or click it. And if you are already in Claude and active (mouse or keyboard in the last 2 minutes) when a question or reply comes in, Mochi doesn't ring at all, just shows the line.
@@ -29,41 +29,32 @@ Mochi also lives on your Windows desktop, outside the Claude window, in a see-th
 - **Zoomies**: after napping for 3 minutes (`napMinutes` in the settings), Mochi takes off DVD style until you catch it with the cursor; then it lands and stays up a minute.
 - **Always on top** (on by default): turn it off to let other windows cover Mochi.
 - **A sound loops** while a question waits or a finished chat is unseen. Right-click → **Sound** to turn it off or pick it: a ringtone of your own saved as `%USERPROFILE%\.claude\mochi\phone.mp3` (the default when it is there), the built-in chime, or any sound file (WAV, MP3, WMA, M4A).
-- Right-click also has size presets, **Start with Windows**, **Start when Claude starts**, and **Quit Mochi**.
+- Right-click also has size presets and **Quit Mochi**, plus two opt-in settings, both off until you tick them:
+  - **Start when Claude starts**: each new Claude session starts desktop Mochi if it isn't running.
+  - **Start with Windows**: adds a `Mochi.lnk` shortcut to your Startup folder. Untick it to remove the shortcut.
 
-It needs nothing installed: it is a Windows PowerShell script (`desktop/mochi-desktop.ps1`). Sessions write their state to `%USERPROFILE%\.claude\mochi\sessions\`; Mochi's settings are in `%USERPROFILE%\.claude\mochi\desktop.json`.
+**What runs, and what it can do.** Desktop Mochi is one Windows PowerShell script, `desktop/mochi-desktop.ps1`, so you can read all of it. `/pet desktop` starts it with Windows PowerShell, with its console window hidden, because Mochi is a window of its own. It uses `-ExecutionPolicy Bypass` for that one process only, because Windows' default policy refuses every unsigned script. The script reads the session reports in `%USERPROFILE%\.claude\mochi\sessions\` and keeps its settings in `%USERPROFILE%\.claude\mochi\desktop.json`. The only thing it ever opens is the Claude app's own `claude://code/continue` link, checked against a fixed pattern. It touches the network only if you turn on the cloud link below.
 
-### Cloud and remote sessions (optional)
+### Cloud and remote sessions (optional, off by default)
 
-A session that runs somewhere else (a cloud session, or Claude Code on another computer) can't reach your PC by itself. With one key, it sends its status to Mochi through [ntfy.sh](https://ntfy.sh), a free push service. You don't need an account or a server. Those chats show up with a cloud before their name.
+A session that runs somewhere else (a cloud session, or Claude Code on another computer, including one you drive with Remote Control) can't reach your PC by itself. If you choose to, you can link it to Mochi with a key. It then sends its status through [ntfy.sh](https://ntfy.sh), a free third-party push service, and those chats show up on Mochi with a cloud before their name. Nothing is sent and nothing listens until you create a key.
 
-**Another computer** (including one you drive with Remote Control):
+1. On the PC with desktop Mochi, right-click Mochi → **Cloud sessions** → **Copy link key**.
+2. On the other side:
+   - **Another computer:** install the plugin there (see Install below). Then run [`desktop/connect-this-computer.ps1`](desktop/connect-this-computer.ps1) from the plugin's folder and paste the key when it asks. The script only saves the key to `%USERPROFILE%\.claude\mochi\link.json`. It downloads, installs and starts nothing. Run it with `-Disconnect` to undo.
+     ```
+     powershell -NoProfile -ExecutionPolicy Bypass -File connect-this-computer.ps1
+     ```
+   - **Cloud sessions:** in your cloud environment's settings, add an environment variable `MOCHI_LINK` with the key as its value.
+3. Start a new chat there, or run `/reload-plugins`.
 
-1. Right-click Mochi → **Cloud sessions** → **Connect another computer...**. This copies a setup message.
-2. Paste the message into any Claude chat on that computer and send it. Claude there installs Mochi's plugin and saves the key to `~/.claude/mochi/link.json`.
-3. Run `/reload-plugins` in that chat, or start a new one.
+**Managing the key:** **New link key** cuts off every session that has the old key. **Turn off** stops listening.
 
-You don't need environment variables. Every Claude session on that computer then reports to your Mochi.
-
-**Cloud sessions:** right-click Mochi → **Cloud sessions** → **Copy link key**. In your cloud environment's settings, add an environment variable `MOCHI_LINK` with that key as its value.
-
-**Managing the key:** To cut off every session that has the old key, use **New link key**. **Turn off** stops listening.
-
-**Privacy.** The key works like a password, so keep it private. Only you can work out the ntfy channel name from it, along with the keys that encrypt and sign each message. ntfy.sh sees only scrambled bytes. Messages are sent with `Cache: no` and `Firebase: no`, so ntfy keeps nothing and forwards nothing. A message carries only the folder name, the state (working, idle, question or approval) and timestamps. It never carries paths or session ids. Mochi drops anything unsigned, tampered with, older than 15 minutes or replayed, and it only ever shows a message as text. Sessions on this PC never use the network for Mochi.
+**Privacy.** The key works like a password, so keep it private. Only you can work out the ntfy channel name from it, along with the keys that encrypt and sign each message. ntfy.sh sees only scrambled bytes. Messages are sent with `Cache: no` and `Firebase: no`, so ntfy keeps nothing and forwards nothing. A message carries only the folder name, the state (working, idle, question or approval) and timestamps. It never carries paths or session ids. Mochi drops anything unsigned, tampered with, older than 15 minutes or replayed, and it only ever shows a message as text. Sessions on the PC with Mochi never use the network for it.
 
 **Load.** ntfy.sh's free tier allows about 250 messages a day per sender. A remote session sends only when its state changes (at most one message every 5 seconds), plus a heartbeat every 10 minutes. Mochi holds one open connection and does no polling. It forgets a remote session after 25 minutes of silence.
 
 ## Install
-
-### The easy way: ask Claude
-
-Paste this into any Claude Code chat (terminal, desktop app or IDE):
-
-> Install the Mochi pixel pet for me: run `claude plugin marketplace add leonpentastorm/mochi-pixel-pet` and then `claude plugin install pixel-pet@mochi-pixel-pet --scope user`.
-
-Claude runs the two commands; Mochi shows up in every Claude Code chat you start after that (and, on Windows, on your desktop).
-
-### Or do it yourself
 
 At the prompt of a Claude Code terminal session:
 
@@ -82,7 +73,7 @@ claude plugin install pixel-pet@mochi-pixel-pet --scope user
 
 In the Claude desktop app: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `leonpentastorm/mochi-pixel-pet`, then **Add plugin** and pick **pixel-pet**.
 
-Start a new chat afterwards: Mochi loads when a session starts.
+Start a new chat afterwards: Mochi loads when a session starts. Mochi needs a Claude Code version with plugin hooks modules; desktop Mochi needs Windows 10 or 11, which come with Windows PowerShell 5.1.
 
 ### Updating and removing
 
@@ -95,18 +86,6 @@ claude plugin update pixel-pet@mochi-pixel-pet
 claude plugin uninstall pixel-pet@mochi-pixel-pet
 claude plugin marketplace remove mochi-pixel-pet
 ```
-
-To stop the desktop Mochi from starting with Claude without uninstalling, right-click it and untick **Start when Claude starts**.
-
-### For Claude: installing this plugin
-
-If a person asks you to install Mochi from this repository, run, in order:
-
-1. `claude plugin marketplace add leonpentastorm/mochi-pixel-pet` (adds this repository as a plugin marketplace named `mochi-pixel-pet`)
-2. `claude plugin install pixel-pet@mochi-pixel-pet --scope user` (installs the `pixel-pet` plugin for all their sessions)
-3. `claude plugin list` and check that `pixel-pet@mochi-pixel-pet` shows **enabled**.
-
-Then tell them to start a new chat to see Mochi. If `claude` is not on the PATH (a desktop-app-only setup), give them the desktop-app steps above instead. Mochi needs a Claude Code version with plugin hooks modules (function hooks); the desktop pet part needs Windows and Windows PowerShell 5.1, both standard on Windows 10 and 11.
 
 ## License
 

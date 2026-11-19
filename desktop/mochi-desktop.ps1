@@ -89,7 +89,7 @@ Write-Log 'started'
 $script:S = @{
   x = $null; y = $null; scale = 4.0
   soundOn = $true; soundChoice = 'phone'; soundFile = $null
-  autoStart = $true; showProgress = $true; wander = $true; dvdMode = $false
+  launchWithClaude = $false; showProgress = $true; wander = $true; dvdMode = $false
   onTop = $true; napMinutes = 3
   link = $null
 }
@@ -581,6 +581,8 @@ function Open-Session($s) {
     $url = 'claude://code/continue?session=last&source=desktop_action'
   }
   if ($env:MOCHI_SNAPSHOT) { Write-Log "test: would open $url"; return }  # tests never open the app
+  # Only ever the Claude app's own continue link, built here from a checked id or 'last'.
+  if ($url -notmatch '^claude://code/continue\?session=(last|local_[A-Za-z0-9-]{1,64})&source=desktop_action$') { Write-Log 'open refused'; return }
   try { Start-Process $url } catch { Write-Log "open failed: $_" }
 }
 
@@ -1072,41 +1074,17 @@ function Copy-LinkKey([bool]$fresh) {
   [void][Windows.MessageBox]::Show(
     "Mochi's cloud link key is on your clipboard.`n`n" +
     "Where your cloud sessions run, add an environment variable named MOCHI_LINK with this key as its value " +
-    "(for cloud sessions: your cloud environment's settings). On another computer, also set MOCHI_RELAY=1.`n`n" +
+    "(for cloud sessions: your cloud environment's settings). For another computer, see 'Cloud and remote sessions' in Mochi's README.`n`n" +
     "Keep the key private, like a password. Updates travel through ntfy.sh encrypted and signed with it; " +
     "ntfy.sh sees only scrambled bytes. 'New link key' cuts off every session using the old one.",
     'Mochi: cloud sessions')
 }
-# Another computer: a message to paste into any Claude chat there (a Remote Control
-# session included). Claude installs the plugin and writes ~/.claude/mochi/link.json.
-$LinkSetupRepo = 'leonpentastorm/mochi-pixel-pet'
-$LinkSetupRef = 'feat/gist-relay'
-function Copy-LinkSetup {
-  if (-not (Get-LinkSecret)) { New-LinkSecret }
-  $key = Get-LinkSecret
-  $text = @"
-Set up Mochi on this computer so my desktop pet on another PC can show the status of my Claude sessions here. Do these steps, then tell me when done:
-
-1. Install the Claude Code plugin pixel-pet from GitHub $LinkSetupRepo, branch ${LinkSetupRef}: download that branch (git clone -b $LinkSetupRef https://github.com/$LinkSetupRepo, or its zip from GitHub) into ~/.claude/mochi/plugin, then run: claude plugin marketplace add <that folder> and claude plugin install pixel-pet@mochi-pixel-pet --scope user. If a marketplace named mochi-pixel-pet already exists, remove it first. If claude is not on PATH, find the Claude Code executable this session runs from and use that.
-2. Write the file ~/.claude/mochi/link.json (on Windows %USERPROFILE%\.claude\mochi\link.json) with exactly this content, and do not print it back or save it anywhere else:
-{"link":"$key","send":true}
-3. Tell me to run /reload-plugins in this chat (or start a new chat) so the plugin loads.
-"@
-  [Windows.Clipboard]::SetText($text)
-  [void][Windows.MessageBox]::Show(
-    "A setup message is on your clipboard.`n`n" +
-    "Paste it into any Claude chat on the other computer (a Remote Control chat works) and send it. " +
-    "Claude there installs Mochi's plugin and saves the link key. Then run /reload-plugins in that chat.`n`n" +
-    "The message holds your link key: use 'New link key' later if you want to cut that computer off.",
-    'Mochi: connect another computer')
-}
 $cloudMenu = Add-MenuItem $menu 'Cloud sessions' $null
-[void](Add-MenuItem $cloudMenu 'Connect another computer...' { Copy-LinkSetup })
 [void](Add-MenuItem $cloudMenu 'Copy link key' { Copy-LinkKey $false })
 [void](Add-MenuItem $cloudMenu 'New link key (cuts off the old one)' { Copy-LinkKey $true })
 [void](Add-MenuItem $cloudMenu 'Turn off' { $script:S.link = $null; Save-Settings; Start-Link; Update-State })
-[void](Add-MenuItem $menu 'Start when Claude starts' { param($item) $script:S.autoStart = $item.IsChecked; Save-Settings } ($script:S.autoStart -ne $false))
-[void](Add-MenuItem $menu 'Start with Windows' { param($item) Set-StartWithWindows $item.IsChecked } (Test-Path $StartupLink))
+[void](Add-MenuItem $menu 'Start when Claude starts' { param($item) $script:S.launchWithClaude = $item.IsChecked; Save-Settings } ($script:S.launchWithClaude -eq $true))
+[void](Add-MenuItem $menu 'Start with Windows (adds Mochi.lnk to your Startup folder)' { param($item) Set-StartWithWindows $item.IsChecked } (Test-Path $StartupLink))
 [void]$menu.Items.Add((New-Object Windows.Controls.Separator))
 [void](Add-MenuItem $menu 'Quit Mochi' { Set-Ringing $false; $win.Close() })
 $petBox.ContextMenu = $menu
