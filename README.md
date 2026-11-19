@@ -33,6 +33,19 @@ Mochi also lives on your Windows desktop, outside the Claude window, in a see-th
 
 It needs nothing installed: it is a Windows PowerShell script (`desktop/mochi-desktop.ps1`). Sessions write their state to `%USERPROFILE%\.claude\mochi\sessions\`; Mochi's settings are in `%USERPROFILE%\.claude\mochi\desktop.json`.
 
+### Cloud and remote sessions (optional)
+
+A session that runs somewhere else (a cloud session, or Claude Code on another computer) can't reach your PC by itself. With one key, it sends its status to Mochi through [ntfy.sh](https://ntfy.sh), a free push service. You don't need an account or a server. Those chats show up with a cloud before their name.
+
+1. Right-click Mochi → **Cloud sessions** → **Copy link key**.
+2. Where your cloud sessions run (your cloud environment's settings), add an environment variable `MOCHI_LINK` with that key as its value. On another computer, also set `MOCHI_RELAY=1`.
+
+That's all. To cut off every session that has the old key, use **New link key**. **Turn off** stops listening.
+
+**Privacy.** The key works like a password, so keep it private. Only you can work out the ntfy channel name from it, along with the keys that encrypt and sign each message. ntfy.sh sees only scrambled bytes. Messages are sent with `Cache: no` and `Firebase: no`, so ntfy keeps nothing and forwards nothing. A message carries only the folder name, the state (working, idle, question or approval) and timestamps. It never carries paths or session ids. Mochi drops anything unsigned, tampered with, older than 15 minutes or replayed, and it only ever shows a message as text. Sessions on this PC never use the network for Mochi.
+
+**Load.** ntfy.sh's free tier allows about 250 messages a day per sender. A remote session sends only when its state changes (at most one message every 5 seconds), plus a heartbeat every 10 minutes. Mochi holds one open connection and does no polling. It forgets a remote session after 25 minutes of silence.
+
 ## Install
 
 ### The easy way: ask Claude

@@ -91,6 +91,7 @@ $script:S = @{
   soundOn = $true; soundChoice = 'phone'; soundFile = $null
   autoStart = $true; showProgress = $true; wander = $true; dvdMode = $false
   onTop = $true; napMinutes = 3
+  link = $null
 }
 if (Test-Path $SettingsFile) {
   try {
@@ -349,8 +350,201 @@ $script:Mood = 'sleeping'
 function Get-Now { [DateTimeOffset]::Now.ToUnixTimeMilliseconds() }
 function Get-Key($s) { if ($s.session) { [string]$s.session } else { [string]$s.cli } }
 
+# ---------------------------------------------------------------- the cloud link
+# Sessions away from this PC (cloud sessions, other machines) can't write the
+# sessions folder. Given the link secret (right-click > Connect cloud sessions...,
+# kept in desktop.json as "link", or the MOCHI_LINK environment variable), they send
+# encrypted, signed reports through ntfy.sh, and Mochi listens there. No account,
+# no server of yours. From the secret come the ntfy topic, an encryption key and a
+# signing key (the same construction as hooks/link.ts):
+#   topic = "mochi_" + first 40 hex of SHA256("mochi-topic-v1:" + secret)
+#   enc   = SHA256("mochi-enc-v1:" + secret)    mac = SHA256("mochi-mac-v1:" + secret)
+#   message = base64url(nonce[16] + ciphertext + HMAC-SHA256(mac, "mochi-v1" + nonce + ciphertext))
+#   keystream block i = SHA256(enc + nonce + uint32be(i))
+# Anything unsigned, malformed, older than 15 minutes or replayed is dropped unread.
+# Nothing from a message is ever opened or run: it only becomes a line of text.
+
+$Utf8 = New-Object System.Text.UTF8Encoding($false)
+function Get-Sha256([byte[]]$bytes) {
+  $sha = [Security.Cryptography.SHA256]::Create()
+  try { return , $sha.ComputeHash($bytes) } finally { $sha.Dispose() }
+}
+function Join-Bytes { $list = New-Object System.Collections.Generic.List[byte]; foreach ($a in $args) { $list.AddRange([byte[]]$a) }; return , $list.ToArray() }
+function ConvertTo-Hex([byte[]]$b) { return (($b | ForEach-Object { $_.ToString('x2') }) -join '') }
+function ConvertFrom-Base64Url([string]$s) {
+  $t = $s.Replace('-', '+').Replace('_', '/')
+  switch ($t.Length % 4) { 2 { $t += '==' } 3 { $t += '=' } 1 { throw 'bad base64url' } }
+  return , [Convert]::FromBase64String($t)
+}
+function Get-Counter([int]$n) { return , [byte[]]@(($n -shr 24) -band 255; ($n -shr 16) -band 255; ($n -shr 8) -band 255; $n -band 255) }
+function ConvertTo-Base64Url([byte[]]$b) { return [Convert]::ToBase64String($b).TrimEnd('=').Replace('+', '-').Replace('/', '_') }
+
+function Get-LinkKeys([string]$secret) {
+  return [pscustomobject]@{
+    topic = 'mochi_' + (ConvertTo-Hex (Get-Sha256 $Utf8.GetBytes("mochi-topic-v1:$secret"))).Substring(0, 40)
+    enc = Get-Sha256 $Utf8.GetBytes("mochi-enc-v1:$secret")
+    mac = Get-Sha256 $Utf8.GetBytes("mochi-mac-v1:$secret")
+  }
+}
+
+# Checks the signature, then decrypts; $null for anything that doesn't check out.
+function Open-LinkMessage($keys, [string]$text) {
+  if ($text.Length -lt 64 -or $text.Length -gt 4000 -or $text -notmatch '^[A-Za-z0-9_-]+$') { return $null }
+  try { $raw = ConvertFrom-Base64Url $text } catch { return $null }
+  if ($raw.Length -lt 49) { return $null }
+  $nonce = [byte[]]$raw[0..15]
+  $ct = [byte[]]$raw[16..($raw.Length - 33)]
+  $tag = [byte[]]$raw[($raw.Length - 32)..($raw.Length - 1)]
+  $h = New-Object Security.Cryptography.HMACSHA256 -ArgumentList (, [byte[]]$keys.mac)
+  try { $want = $h.ComputeHash((Join-Bytes $Utf8.GetBytes('mochi-v1') $nonce $ct)) } finally { $h.Dispose() }
+  $diff = 0
+  for ($i = 0; $i -lt 32; $i++) { $diff = $diff -bor ($want[$i] -bxor $tag[$i]) }
+  if ($diff -ne 0) { return $null }
+  $pt = New-Object byte[] $ct.Length
+  for ($i = 0; $i -lt $ct.Length; $i += 32) {
+    $n = [int]($i / 32)
+    $ks = Get-Sha256 (Join-Bytes $keys.enc $nonce (Get-Counter $n))
+    for ($j = 0; $j -lt 32 -and ($i + $j) -lt $ct.Length; $j++) { $pt[$i + $j] = $ct[$i + $j] -bxor $ks[$j] }
+  }
+  try { return $Utf8.GetString($pt) | ConvertFrom-Json } catch { return $null }
+}
+
+# Encrypts and signs, as a remote session does (for the tests).
+function New-LinkMessage($keys, [string]$plaintext, [byte[]]$nonce = $null) {
+  if (-not $nonce) { $nonce = New-Object byte[] 16; $rng = [Security.Cryptography.RandomNumberGenerator]::Create(); $rng.GetBytes($nonce); $rng.Dispose() }
+  $pt = $Utf8.GetBytes($plaintext)
+  $ct = New-Object byte[] $pt.Length
+  for ($i = 0; $i -lt $pt.Length; $i += 32) {
+    $n = [int]($i / 32)
+    $ks = Get-Sha256 (Join-Bytes $keys.enc $nonce (Get-Counter $n))
+    for ($j = 0; $j -lt 32 -and ($i + $j) -lt $pt.Length; $j++) { $ct[$i + $j] = $pt[$i + $j] -bxor $ks[$j] }
+  }
+  $h = New-Object Security.Cryptography.HMACSHA256 -ArgumentList (, [byte[]]$keys.mac)
+  try { $tag = $h.ComputeHash((Join-Bytes $Utf8.GetBytes('mochi-v1') $nonce $ct)) } finally { $h.Dispose() }
+  return ConvertTo-Base64Url (Join-Bytes $nonce $ct $tag)
+}
+
+# A checked report becomes a session like a local one, with only plain text in it.
+function ConvertFrom-LinkReport($m) {
+  if ($null -eq $m -or $m.v -ne 1 -or [string]$m.k -notmatch '^[0-9a-f]{16}$') { return $null }
+  $project = (([string]$m.p) -replace '[\x00-\x1F\x7F]', '').Trim()
+  if ($project.Length -gt 40) { $project = $project.Substring(0, 40) }
+  $alert = if ($m.a -eq 'question' -or $m.a -eq 'permission') { [string]$m.a } else { $null }
+  $mood = if ($m.m -eq 'working') { 'working' } else { 'idle' }
+  return [pscustomobject]@{
+    v = 1; session = $null; cli = "remote_$($m.k)"; project = $project; cwd = ''
+    mood = $mood; alert = $alert; alertSince = [double]$m.as; startedAt = [double]$m.s; finishedAt = [double]$m.f
+    updated = [double]$m.u; ended = [bool]$m.e; remote = $true
+  }
+}
+
+$script:Remote = @{}          # remote_<k> -> its latest report
+$script:LinkKeys = $null
+$script:LinkClient = $null
+$script:LinkConnect = $null   # the request being made
+$script:LinkReader = $null    # the open stream
+$script:LinkLine = $null      # the line being read
+$script:LinkHeard = 0         # when the stream last said anything (ntfy sends keepalives)
+$script:LinkNext = 0          # when to connect again
+$script:LinkBackoff = 5000
+$script:LinkCancel = $null
+
+function Get-LinkSecret {
+  $v = [string]$script:S.link
+  if (-not $v) { $v = [Environment]::GetEnvironmentVariable('MOCHI_LINK', 'Process') }
+  if (-not $v) { $v = [Environment]::GetEnvironmentVariable('MOCHI_LINK', 'User') }
+  $v = "$v".Trim()
+  if ($v -match '^[A-Za-z0-9_-]{43}$') { return $v } else { return '' }
+}
+
+function Stop-Link {
+  try { if ($script:LinkCancel) { $script:LinkCancel.Cancel() } } catch { }
+  try { if ($script:LinkReader) { $script:LinkReader.Dispose() } } catch { }
+  $script:LinkConnect = $null; $script:LinkReader = $null; $script:LinkLine = $null; $script:LinkCancel = $null
+}
+
+function Start-Link {
+  Stop-Link
+  $secret = Get-LinkSecret
+  $script:LinkKeys = if ($secret) { Get-LinkKeys $secret } else { $null }
+  $script:Remote = @{}
+  if (-not $script:LinkKeys) { return }
+  if (-not $script:LinkClient) {
+    Add-Type -AssemblyName System.Net.Http
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $script:LinkClient = New-Object System.Net.Http.HttpClient
+    $script:LinkClient.Timeout = [Threading.Timeout]::InfiniteTimeSpan
+    $script:LinkClient.DefaultRequestHeaders.Add('User-Agent', 'mochi-pixel-pet')
+  }
+  $script:LinkNext = 0
+  Write-Log 'link: on'
+}
+
+# Called once a second; never waits on the network.
+function Update-Link {
+  if (-not $script:LinkKeys) { return }
+  $now = Get-Now
+  try {
+    if ($script:LinkReader) {
+      # Every line that has come in since the last tick.
+      for ($i = 0; $i -lt 50; $i++) {
+        if (-not $script:LinkLine) { $script:LinkLine = $script:LinkReader.ReadLineAsync() }
+        if (-not $script:LinkLine.IsCompleted) { break }
+        $line = $script:LinkLine.Result
+        $script:LinkLine = $null
+        if ($null -eq $line) { throw 'stream closed' }
+        $script:LinkHeard = $now
+        $script:LinkBackoff = 5000
+        if ($line.Length -gt 8000) { continue }
+        try { $evt = $line | ConvertFrom-Json } catch { continue }
+        if ($evt.event -ne 'message') { continue }
+        $s = ConvertFrom-LinkReport (Open-LinkMessage $script:LinkKeys ([string]$evt.message))
+        if ($null -eq $s) { continue }
+        if ([Math]::Abs($now - $s.updated) -gt 900000) { continue }          # stale or far-off clock
+        $old = $script:Remote[$s.cli]
+        if ($old -and $s.updated -le $old.updated) { continue }             # replayed
+        $script:Remote[$s.cli] = $s
+      }
+      if ($now - $script:LinkHeard -gt 120000) { throw 'stream silent' }
+      return
+    }
+    if ($script:LinkConnect) {
+      if (-not $script:LinkConnect.IsCompleted) {
+        if ($now - $script:LinkHeard -gt 30000) { throw 'connect timed out' }
+        return
+      }
+      $res = $script:LinkConnect.Result
+      $script:LinkConnect = $null
+      if (-not $res.IsSuccessStatusCode) { throw "ntfy said $([int]$res.StatusCode)" }
+      $script:LinkReader = New-Object IO.StreamReader($res.Content.ReadAsStreamAsync().Result, $Utf8)
+      $script:LinkHeard = $now
+      return
+    }
+    if ($now -lt $script:LinkNext) { return }
+    $script:LinkCancel = New-Object Threading.CancellationTokenSource
+    $req = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Get, "https://ntfy.sh/$($script:LinkKeys.topic)/json")
+    $script:LinkConnect = $script:LinkClient.SendAsync($req, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead, $script:LinkCancel.Token)
+    $script:LinkHeard = $now
+  } catch {
+    Write-Log "link: $($_.Exception.Message -replace '[\r\n]+', ' ')"
+    Stop-Link
+    $script:LinkNext = $now + $script:LinkBackoff
+    $script:LinkBackoff = [Math]::Min($script:LinkBackoff * 2, 300000)
+  }
+}
+
+# Makes a new secret (any old one stops working), saves it, and puts it on the clipboard.
+function New-LinkSecret {
+  $bytes = New-Object byte[] 32
+  $rng = [Security.Cryptography.RandomNumberGenerator]::Create(); $rng.GetBytes($bytes); $rng.Dispose()
+  $script:S.link = ConvertTo-Base64Url $bytes
+  Save-Settings
+  Start-Link
+}
+
 function Read-Sessions {
   $now = Get-Now
+  Update-Link
   $live = New-Object System.Collections.ArrayList
   foreach ($f in @(Get-ChildItem -Path $SessionsDir -Filter '*.json' -ErrorAction SilentlyContinue)) {
     $s = $null
@@ -360,6 +554,12 @@ function Read-Sessions {
     $age = $now - [double]$s.updated
     if ($age -gt 86400000) { Remove-Item -LiteralPath $f.FullName -ErrorAction SilentlyContinue; continue }
     if ($s.ended -or $age -gt 45000) { continue }
+    [void]$live.Add($s)
+  }
+  # A remote session sends a heartbeat every 10 minutes; one silent for 25 is gone.
+  foreach ($k in @($script:Remote.Keys)) {
+    $s = $script:Remote[$k]
+    if ($s.ended -or ($now - $s.updated) -gt 1500000) { $script:Remote.Remove($k); continue }
     [void]$live.Add($s)
   }
   return , $live
@@ -507,6 +707,7 @@ function Update-State {
     foreach ($s in $group) {
       $name = $base
       if ($group.Count -gt 1 -and $script:ChatNo.ContainsKey((Get-Key $s))) { $name = "$base #$($script:ChatNo[(Get-Key $s)])" }
+      if ($s.remote) { $name = [string][char]0x2601 + " $name" }  # a cloud: it runs away from this PC
       [pscustomobject]@{ s = $s; name = $name }
     }
   }
@@ -864,6 +1065,22 @@ $script:SoundItems['custom'] = Add-MenuItem $soundMenu 'Your own sound file...' 
 [void](Add-MenuItem $soundMenu 'Play it once' { $script:Tester.Open((New-Object Uri (Get-SoundFile))); $script:Tester.Play() })
 
 [void]$menu.Items.Add((New-Object Windows.Controls.Separator))
+# Cloud sessions: the link key goes on the clipboard, never in a file other than desktop.json.
+function Copy-LinkKey([bool]$fresh) {
+  if ($fresh -or -not (Get-LinkSecret)) { New-LinkSecret }
+  [Windows.Clipboard]::SetText((Get-LinkSecret))
+  [void][Windows.MessageBox]::Show(
+    "Mochi's cloud link key is on your clipboard.`n`n" +
+    "Where your cloud sessions run, add an environment variable named MOCHI_LINK with this key as its value " +
+    "(for cloud sessions: your cloud environment's settings). On another computer, also set MOCHI_RELAY=1.`n`n" +
+    "Keep the key private, like a password. Updates travel through ntfy.sh encrypted and signed with it; " +
+    "ntfy.sh sees only scrambled bytes. 'New link key' cuts off every session using the old one.",
+    'Mochi: cloud sessions')
+}
+$cloudMenu = Add-MenuItem $menu 'Cloud sessions' $null
+[void](Add-MenuItem $cloudMenu 'Copy link key' { Copy-LinkKey $false })
+[void](Add-MenuItem $cloudMenu 'New link key (cuts off the old one)' { Copy-LinkKey $true })
+[void](Add-MenuItem $cloudMenu 'Turn off' { $script:S.link = $null; Save-Settings; Start-Link; Update-State })
 [void](Add-MenuItem $menu 'Start when Claude starts' { param($item) $script:S.autoStart = $item.IsChecked; Save-Settings } ($script:S.autoStart -ne $false))
 [void](Add-MenuItem $menu 'Start with Windows' { param($item) Set-StartWithWindows $item.IsChecked } (Test-Path $StartupLink))
 [void]$menu.Items.Add((New-Object Windows.Controls.Separator))
@@ -905,6 +1122,7 @@ $poll = New-Object Windows.Threading.DispatcherTimer
 $poll.Interval = [TimeSpan]::FromSeconds(1)
 $poll.Add_Tick({ try { Update-State } catch { Write-Log "poll: $_" } })
 
+try { Start-Link } catch { Write-Log "link: $_" }
 try { Update-State } catch { Write-Log "first poll: $_" }
 $animation.Start()
 $poll.Start()
