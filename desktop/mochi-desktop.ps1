@@ -1077,7 +1077,31 @@ function Copy-LinkKey([bool]$fresh) {
     "ntfy.sh sees only scrambled bytes. 'New link key' cuts off every session using the old one.",
     'Mochi: cloud sessions')
 }
+# Another computer: a message to paste into any Claude chat there (a Remote Control
+# session included). Claude installs the plugin and writes ~/.claude/mochi/link.json.
+$LinkSetupRepo = 'leonpentastorm/mochi-pixel-pet'
+$LinkSetupRef = 'feat/gist-relay'
+function Copy-LinkSetup {
+  if (-not (Get-LinkSecret)) { New-LinkSecret }
+  $key = Get-LinkSecret
+  $text = @"
+Set up Mochi on this computer so my desktop pet on another PC can show the status of my Claude sessions here. Do these steps, then tell me when done:
+
+1. Install the Claude Code plugin pixel-pet from GitHub $LinkSetupRepo, branch ${LinkSetupRef}: download that branch (git clone -b $LinkSetupRef https://github.com/$LinkSetupRepo, or its zip from GitHub) into ~/.claude/mochi/plugin, then run: claude plugin marketplace add <that folder> and claude plugin install pixel-pet@mochi-pixel-pet --scope user. If a marketplace named mochi-pixel-pet already exists, remove it first. If claude is not on PATH, find the Claude Code executable this session runs from and use that.
+2. Write the file ~/.claude/mochi/link.json (on Windows %USERPROFILE%\.claude\mochi\link.json) with exactly this content, and do not print it back or save it anywhere else:
+{"link":"$key","send":true}
+3. Tell me to run /reload-plugins in this chat (or start a new chat) so the plugin loads.
+"@
+  [Windows.Clipboard]::SetText($text)
+  [void][Windows.MessageBox]::Show(
+    "A setup message is on your clipboard.`n`n" +
+    "Paste it into any Claude chat on the other computer (a Remote Control chat works) and send it. " +
+    "Claude there installs Mochi's plugin and saves the link key. Then run /reload-plugins in that chat.`n`n" +
+    "The message holds your link key: use 'New link key' later if you want to cut that computer off.",
+    'Mochi: connect another computer')
+}
 $cloudMenu = Add-MenuItem $menu 'Cloud sessions' $null
+[void](Add-MenuItem $cloudMenu 'Connect another computer...' { Copy-LinkSetup })
 [void](Add-MenuItem $cloudMenu 'Copy link key' { Copy-LinkKey $false })
 [void](Add-MenuItem $cloudMenu 'New link key (cuts off the old one)' { Copy-LinkKey $true })
 [void](Add-MenuItem $cloudMenu 'Turn off' { $script:S.link = $null; Save-Settings; Start-Link; Update-State })

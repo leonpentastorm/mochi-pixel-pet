@@ -22,8 +22,14 @@ test('sealing matches the desktop pet byte for byte (tests/link-desktop.ps1 prin
 
 const SECRET = 'A'.repeat(43)
 
-function setup(on: On, env: Record<string, string>) {
+function setup(on: On, env: Record<string, string>, files: Record<string, string> = {}) {
   const clock = mock.clock(on)
+  on('fs.read', (_, e) => {
+    // The engine hands paths over made absolute for this OS (C:\home\user\... on Windows).
+    const path = String(e.path).replace(/\\/g, '/')
+    const text = Object.entries(files).find(([name]) => path.endsWith(name))?.[1]
+    return text === undefined ? { deny: 'no such file' } : { value: text }
+  })
   on('session.surfaces', () => ({ value: ['desktop'] }))
   on('command.register', () => ({ value: { command: 'pet' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
@@ -82,6 +88,27 @@ test('a session on the pet’s own PC never touches the network', async ($, on) 
 
 test('a remote session with a malformed link key stays quiet', async ($, on) => {
   const { clock, sent } = setup(on, { HOME: '/home/user', CLAUDE_CODE_REMOTE: 'true', MOCHI_LINK: 'too-short' })
+  await $.session.start({ cwd: '/home/user/my-repo', surface: 'desktop', isInteractive: true })
+  await clock.advance(30_000)
+  expect(sent).toEqual([])
+})
+
+test('link.json alone is enough: no environment variables needed', async ($, on) => {
+  const { clock, sent, written } = setup(on, { HOME: '/home/user' }, {
+    '/home/user/.claude/mochi/link.json': JSON.stringify({ link: SECRET, send: true }),
+  })
+  await $.session.start({ cwd: '/home/user/my-repo', surface: 'desktop', isInteractive: true })
+  await clock.advance(1_000)
+  const { topic } = await linkKeys(SECRET)
+  expect(sent.length).toBe(1)
+  expect(sent[0]!.url).toBe(`https://ntfy.sh/${topic}`)
+  expect(written.filter(p => p.includes('sessions'))).toEqual([])
+})
+
+test('link.json without send:true leaves the session local', async ($, on) => {
+  const { clock, sent } = setup(on, { HOME: '/home/user' }, {
+    '/home/user/.claude/mochi/link.json': JSON.stringify({ link: SECRET }),
+  })
   await $.session.start({ cwd: '/home/user/my-repo', surface: 'desktop', isInteractive: true })
   await clock.advance(30_000)
   expect(sent).toEqual([])

@@ -74,11 +74,22 @@ const join = (...parts: string[]) => parts.join(sep(parts[0] ?? ''))
 const baseName = (path: string) => path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || path
 
 /**
- * The link this session reports through, if it runs away from the pet's PC: a cloud
- * session (CLAUDE_CODE_REMOTE=true), or any session with MOCHI_RELAY=1, given
- * MOCHI_LINK, the secret the desktop pet made.
+ * The link this session reports through, if it runs away from the pet's PC. Either
+ * - the file ~/.claude/mochi/link.json, `{"link":"<secret>","send":true}`, which the
+ *   pet's "Connect another computer" has Claude write on that computer; or
+ * - MOCHI_LINK, the secret the pet made, in a cloud session (CLAUDE_CODE_REMOTE=true)
+ *   or any session with MOCHI_RELAY=1.
  */
-export async function linkOf($: $): Promise<LinkKeys | undefined> {
+export async function linkOf($: $, home: string): Promise<LinkKeys | undefined> {
+  if (home) {
+    const text = await $.fs.read(join(home, '.claude', 'mochi', 'link.json')).catch(() => '')
+    try {
+      const file = text ? (JSON.parse(text.replace(/^﻿/, '')) as { link?: unknown; send?: unknown }) : undefined
+      if (file?.send === true && typeof file.link === 'string' && LINK_PATTERN.test(file.link.trim())) return linkKeys(file.link.trim())
+    } catch {
+      // Unreadable: fall back to the environment.
+    }
+  }
   const remote = (await $.env.get('CLAUDE_CODE_REMOTE')) === 'true' || (await $.env.get('MOCHI_RELAY')) === '1'
   if (!remote) return undefined
   const secret = (await $.env.get('MOCHI_LINK'))?.trim()
@@ -88,8 +99,12 @@ export async function linkOf($: $): Promise<LinkKeys | undefined> {
 
 /** Works out where this session reports, and readies the shared folder. */
 export async function openDesktop($: $): Promise<Desktop | undefined> {
-  const link = await linkOf($)
+  // A new session starts with nothing sent.
+  lastWritten = ''
+  lastWriteAt = -Infinity
+  linkRetryAt = 0
   const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? ''
+  const link = await linkOf($, home)
   if (!home && !link) return undefined
   const session = (await $.env.get('CLAUDE_CODE_HOST_SESSION_ID')) ?? null
   const cli = await $.session.id()
